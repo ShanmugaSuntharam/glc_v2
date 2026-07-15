@@ -29,19 +29,21 @@ ADAPTER_SECRETS = frozenset(
     {"telegram", "whatsapp", "gmail", "twilio_sms", "teams", "webhook", "twilio_voice"}
 )
 
-_state: dict[str, Any] = {"app": None, "image": None}
+_state: dict[str, Any] = {"app": None, "image_builder": None}
 
 
 class SandboxAdapterError(RuntimeError):
     """adapter_runner.py reported an error from inside the sandbox."""
 
 
-def configure(app: Any, image: Any) -> None:
-    """Called once by modal_app.py at boot so Sandboxes reuse the
-    gateway's own App/Image - no duplicate image build, no lookup-by-name
-    race against a not-yet-deployed app."""
+def configure(app: Any, image_builder: Any) -> None:
+    """Called once by modal_app.py at boot. image_builder is a zero-arg
+    callable returning a fresh modal.Image (modal_app.py's build_image) -
+    reusing the Function's already-hydrated Image object was found (during
+    live verification) to not reliably carry its add_local_dir mount over
+    to a new Sandbox, so a fresh Image is built per Sandbox instead."""
     _state["app"] = app
-    _state["image"] = image
+    _state["image_builder"] = image_builder
 
 
 def sandbox_enabled() -> bool:
@@ -73,7 +75,7 @@ async def _create_sandbox(name: str) -> Any:
     secrets = [modal.Secret.from_name(f"glc-adapter-{name}")] if name in ADAPTER_SECRETS else []
     kwargs: dict[str, Any] = {
         "app": _state["app"],
-        "image": _state["image"],
+        "image": _state["image_builder"](),
         "secrets": secrets,
         "timeout": RUNNER_TIMEOUT_S,
     }
