@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
+from glc.security.auth import require_install_token
 from glc.voice.tts import TTSError, synthesize
 
 router = APIRouter()
@@ -28,7 +29,8 @@ class SpeakResponse(BaseModel):
 
 
 @router.post("/v1/speak", response_model=SpeakResponse)
-async def speak_route(req: SpeakRequest):
+async def speak_route(req: SpeakRequest, authorization: str | None = Header(default=None)):
+    require_install_token(authorization)
     try:
         r = await synthesize(req.text, voice_id=req.voice_id, prefer=req.prefer)
     except TTSError as e:

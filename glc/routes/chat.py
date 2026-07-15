@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from jsonschema import Draft202012Validator, ValidationError
 
@@ -36,6 +36,7 @@ from glc.llm_schemas import (
     VisionRequest,
 )
 from glc.routing import DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS
+from glc.security.auth import require_install_token
 
 DEFAULT_ORDER = ["ollama", "gemini", "nvidia", "groq", "cerebras", "openrouter", "github"]
 ORDER = [x.strip() for x in os.getenv("LLM_ORDER", ",".join(DEFAULT_ORDER)).split(",") if x.strip()]
@@ -345,7 +346,8 @@ def _validate_structured(text: str, schema: dict):
 
 
 @router.post("/v1/chat")
-async def chat(req: ChatRequest, request: Request):
+async def chat(req: ChatRequest, request: Request, authorization: str | None = Header(default=None)):
+    require_install_token(authorization)
     state = request.app.state
     rtr = state.router
     router_pool = state.router_pool
@@ -638,7 +640,10 @@ async def chat(req: ChatRequest, request: Request):
 
 
 @router.post("/v1/chat/batch")
-async def chat_batch(req: BatchChatRequest, request: Request):
+async def chat_batch(
+    req: BatchChatRequest, request: Request, authorization: str | None = Header(default=None)
+):
+    require_install_token(authorization)
     sem = _asyncio.Semaphore(max(1, req.max_concurrency))
 
     async def _one(call: ChatRequest):
@@ -655,7 +660,8 @@ async def chat_batch(req: BatchChatRequest, request: Request):
 
 
 @router.post("/v1/vision")
-async def vision(req: VisionRequest, request: Request):
+async def vision(req: VisionRequest, request: Request, authorization: str | None = Header(default=None)):
+    require_install_token(authorization)
     content: list[dict[str, Any]] = [{"type": "text", "text": req.prompt}]
     content.append({"type": "image_url", "image_url": {"url": req.image}})
     inner = ChatRequest(
@@ -677,7 +683,8 @@ async def vision(req: VisionRequest, request: Request):
 
 
 @router.post("/v1/embed")
-async def embed(req: EmbedRequest, request: Request):
+async def embed(req: EmbedRequest, request: Request, authorization: str | None = Header(default=None)):
+    require_install_token(authorization)
     from glc import embedders as E
 
     state = request.app.state
