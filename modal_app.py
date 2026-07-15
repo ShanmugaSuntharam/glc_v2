@@ -38,8 +38,14 @@ image = (
         "pyyaml>=6.0",
         "websockets>=12.0",
         "twilio>=9.0",
+        "modal>=1.5.1",
     )
-    .env({"GLC_CONFIG_DIR": "/data/glc"})
+    # GLC_ADAPTER_SANDBOX=1: Session 12, finding A3. glc/routes/channels.py
+    # runs channel-adapter code in its own Modal Sandbox (see
+    # glc/sandbox/dispatch.py) instead of in-process, with network egress
+    # restricted per glc/channels.yaml. Off by default (unset -> in-process,
+    # what local dev and the test suite use) so this is opt-in per-deployment.
+    .env({"GLC_CONFIG_DIR": "/data/glc", "GLC_ADAPTER_SANDBOX": "1"})
     .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc")
 )
 
@@ -66,6 +72,12 @@ def fastapi_app():
     # The gateway writes its databases and install token here on startup, so the
     # folder must exist on the mounted Volume before the app's lifespan runs.
     os.makedirs("/data/glc", exist_ok=True)
+
+    # Finding A3: let glc.sandbox.dispatch spin up per-adapter Sandboxes
+    # reusing this same App/Image, instead of rebuilding/looking one up.
+    from glc.sandbox import dispatch
+
+    dispatch.configure(app=app, image=image)
 
     from glc.main import app as web  # the real glc_v1 app, imported as-is
     return web

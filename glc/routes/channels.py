@@ -25,6 +25,7 @@ from glc.audit import append as audit_append
 from glc.channels import registry
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.config import get_or_create_install_token
+from glc.sandbox import dispatch
 from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
 from glc.security.rate_limits import get_rate_limiter
@@ -132,17 +133,35 @@ async def channel_webhook_verify(name: str, request: Request):
 
 @router.post("/v1/channels/{name}/webhook")
 async def channel_webhook(name: str, request: Request):
-    try:
-        adapter = registry.instantiate(name)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown channel: {name}") from None
-
+    """Session 12, finding A3: when GLC_ADAPTER_SANDBOX=1, on_message/send
+    run inside a Modal Sandbox network-restricted to this channel's
+    outbound_domains (glc/channels.yaml), instead of in-process here with
+    unrestricted egress. The policy/rate-limit/audit checks below always
+    run in the trusted gateway, unchanged either way."""
     raw = {
         "raw_body": await request.body(),
         "headers": dict(request.headers),
     }
-    msg = await adapter.on_message(raw)
+
+    adapter = None
+    sandbox_session = None
+    if dispatch.sandbox_enabled():
+        if name not in registry.list_channels():
+            raise HTTPException(status_code=404, detail=f"unknown channel: {name}")
+        try:
+            msg, sandbox_session = await dispatch.on_message_via_sandbox(name, raw)
+        except dispatch.SandboxAdapterError as e:
+            raise HTTPException(status_code=502, detail=f"adapter sandbox error: {e}") from None
+    else:
+        try:
+            adapter = registry.instantiate(name)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"unknown channel: {name}") from None
+        msg = await adapter.on_message(raw)
+
     if msg is None:
+        if sandbox_session is not None:
+            await dispatch.close_sandbox(sandbox_session)
         return {"status": "ok"}
 
     limiter = get_rate_limiter()
@@ -164,6 +183,8 @@ async def channel_webhook(name: str, request: Request):
             event_type="allowlist_drop",
             result={"reason": why},
         )
+        if sandbox_session is not None:
+            await dispatch.close_sandbox(sandbox_session)
         return {"status": "ok"}
 
     ok, why = limiter.check_message(msg.channel, msg.channel_user_id)
@@ -175,6 +196,8 @@ async def channel_webhook(name: str, request: Request):
             event_type="rate_limit",
             result={"reason": why},
         )
+        if sandbox_session is not None:
+            await dispatch.close_sandbox(sandbox_session)
         return JSONResponse(status_code=429, content={"error": why})
 
     audit_append(
@@ -191,5 +214,9 @@ async def channel_webhook(name: str, request: Request):
         text=f"[glc echo] {msg.text or ''}",
         thread_id=msg.thread_id,
     )
-    await adapter.send(reply)
+    if sandbox_session is not None:
+        await dispatch.send_via_sandbox(sandbox_session, name, reply)
+    else:
+        assert adapter is not None  # non-sandboxed path always instantiates one above
+        await adapter.send(reply)
     return {"status": "ok"}

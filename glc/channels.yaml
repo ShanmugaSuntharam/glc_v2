@@ -2,26 +2,35 @@
 # allowlists, rate limits, and adapter wiring. Override by dropping a
 # channels.yaml in ~/.glc/.
 
+# Session 12, finding A3: when GLC_ADAPTER_SANDBOX=1 (set on the Modal
+# deployment), each channel's adapter code runs in its own Modal Sandbox,
+# network-restricted to `outbound_domains`. `block_network: true` means
+# the adapter gets no network access at all (correct for channels with no
+# real outbound HTTP call in this codebase today). A channel with neither
+# key set falls back to `defaults.outbound_domains` (empty = no egress) —
+# safe by default. See glc/sandbox/dispatch.py.
+
 defaults:
   rate_limits:
     messages_per_minute: 30
     tool_calls_per_minute: 20
   allowed_senders: []            # empty == owner-only by default
   mention_only_in_public: true
+  outbound_domains: []           # safe default: no egress unless listed below
 
 channels:
-  telegram:    {enabled: false}
-  discord:     {enabled: false}
-  slack:       {enabled: false}
-  whatsapp:    {enabled: true}
-  teams:       {enabled: false}
-  matrix:      {enabled: false}
-  line:        {enabled: false}
-  signal:      {enabled: false}
-  gmail:       {enabled: false}
-  imap:        {enabled: false}
-  twilio_sms:  {enabled: false}
-  twilio_voice: {enabled: false}
-  webui:       {enabled: true}
-  webhook:     {enabled: false}
-  local_mic:   {enabled: false}
+  telegram:     {enabled: false, outbound_domains: ["api.telegram.org"]}
+  discord:      {enabled: false, block_network: true}   # no real HTTP transport yet (mock-injected)
+  slack:        {enabled: false, block_network: true}   # no real HTTP transport yet (mock-injected)
+  whatsapp:     {enabled: true,  outbound_domains: ["graph.facebook.com", "api.twilio.com"]}
+  teams:        {enabled: false, outbound_domains: ["login.microsoftonline.com"]}  # reply target (serviceUrl) is dynamic per-conversation; not yet validated/allowlisted, see FINDINGS.md
+  matrix:       {enabled: false, block_network: true}   # homeserver is deployment-specific AND no real transport yet
+  line:         {enabled: false, block_network: true}   # no real HTTP transport yet (mock-injected)
+  signal:       {enabled: false, block_network: true}   # no HTTP in this repo (external signal-cli, not present)
+  gmail:        {enabled: false, outbound_domains: ["oauth2.googleapis.com", "www.googleapis.com"]}
+  imap:         {enabled: false, outbound_domains: []}  # host/port come from per-install config, not a fixed public domain; operator must set this to their real IMAP/SMTP host, see FINDINGS.md
+  twilio_sms:   {enabled: false, outbound_domains: ["api.twilio.com"]}
+  twilio_voice: {enabled: false, block_network: true}   # only returns TwiML text, never dials out
+  webui:        {enabled: true,  block_network: true}   # in-process WS to our own frontend only
+  webhook:      {enabled: false, outbound_domains: []}  # relay target is per-install config (WEBHOOK_DEFAULT_TARGET_URL); operator must set this to their real target host, see FINDINGS.md
+  local_mic:    {enabled: false, block_network: true}   # local audio only
