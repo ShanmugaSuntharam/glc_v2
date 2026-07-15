@@ -7,8 +7,12 @@ LLM provider Secret — it only imports glc.channels.registry (unchanged)
 to instantiate the one named adapter and calls on_message/send on it.
 
 Usage (invoked by glc.sandbox.dispatch via Sandbox.exec):
-    python -m glc.sandbox.adapter_runner <on_message|send> <channel_name>
-    stdin:  one JSON object (see _run_on_message/_run_send for shape)
+    python -m glc.sandbox.adapter_runner <on_message|send> <channel_name> <payload_b64>
+    payload_b64: base64 of one JSON object (see _run_on_message/_run_send
+        for shape). Passed as an argv, not over stdin - Sandbox.exec's
+        stdin.write_eof() was observed to tear down the whole sandbox
+        rather than just closing that exec's stdin, so writing to stdin
+        is avoided entirely here.
     stdout: one JSON object: {"result": ...} or {"error": "..."}
 """
 
@@ -60,15 +64,15 @@ def dispatch(mode: str, name: str, payload: dict) -> dict:
 
 
 def main() -> None:
-    if len(sys.argv) != 3 or sys.argv[1] not in ("on_message", "send"):
+    if len(sys.argv) != 4 or sys.argv[1] not in ("on_message", "send"):
         print(
-            json.dumps({"error": "usage: adapter_runner.py <on_message|send> <channel_name>"}),
+            json.dumps({"error": "usage: adapter_runner.py <on_message|send> <channel_name> <payload_b64>"}),
             file=sys.stderr,
         )
         raise SystemExit(2)
 
-    mode, name = sys.argv[1], sys.argv[2]
-    payload = json.loads(sys.stdin.read())
+    mode, name, payload_b64 = sys.argv[1], sys.argv[2], sys.argv[3]
+    payload = json.loads(base64.b64decode(payload_b64))
     out = dispatch(mode, name, payload)
     sys.stdout.write(json.dumps(out))
     sys.stdout.flush()

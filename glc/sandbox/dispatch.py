@@ -85,9 +85,15 @@ async def _create_sandbox(name: str) -> Any:
 
 
 async def _exec(sandbox: Any, mode: str, name: str, payload: dict) -> dict:
-    proc = await sandbox.exec.aio("python", "-m", "glc.sandbox.adapter_runner", mode, name)
-    proc.stdin.write(json.dumps(payload))
-    proc.stdin.write_eof()
+    # Payload travels as a base64 argv, not over stdin: calling
+    # stdin.write_eof() on a Sandbox.exec process was observed (during
+    # live verification of this finding) to tear down the whole sandbox
+    # container, not just close that one exec's stdin - so stdin is never
+    # used here. /root is already on sys.path by default in this image
+    # (confirmed empirically), so "import glc" resolves without needing
+    # an explicit workdir either.
+    payload_b64 = base64.b64encode(json.dumps(payload).encode()).decode()
+    proc = await sandbox.exec.aio("python", "-m", "glc.sandbox.adapter_runner", mode, name, payload_b64)
     out = await proc.stdout.read.aio()
     await proc.wait.aio()
     if not out:
