@@ -73,7 +73,18 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="GLC v1 — Gateway for LLMs and Channels", lifespan=lifespan)
+# Finding A2: /docs, /redoc, and /openapi.json publicly leaked the full
+# route map with no auth. Off by default; set GLC_ENABLE_DOCS=1 to opt in
+# (e.g. for local development).
+_DOCS_ENABLED = os.getenv("GLC_ENABLE_DOCS") == "1"
+
+app = FastAPI(
+    title="GLC v1 — Gateway for LLMs and Channels",
+    lifespan=lifespan,
+    docs_url="/docs" if _DOCS_ENABLED else None,
+    redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
+)
 
 app.include_router(chat_route.router)
 app.include_router(transcribe_route.router)
@@ -84,11 +95,17 @@ app.include_router(channels_route.router)
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
+    docs_line = (
+        "<p>Open <code>/docs</code> for the OpenAPI explorer.</p>"
+        if _DOCS_ENABLED
+        else "<p>The OpenAPI explorer is disabled on this deployment "
+        "(set <code>GLC_ENABLE_DOCS=1</code> to enable it).</p>"
+    )
     return (
         "<html><body style='font-family:sans-serif;max-width:680px;margin:2em auto'>"
         "<h1>GLC v1</h1>"
         "<p>Gateway for LLMs and Channels — Session 11 scaffold.</p>"
-        "<p>Open <code>/docs</code> for the OpenAPI explorer.</p>"
+        f"{docs_line}"
         "<p>Channel adapters connect over <code>WS /v1/channels/&lt;name&gt;</code>."
         " V9 callers should point at this port unchanged: chat, vision, embed,"
         " batch, cost-by-agent, providers, capabilities, status, calls."

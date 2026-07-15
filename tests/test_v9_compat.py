@@ -10,7 +10,12 @@ from __future__ import annotations
 
 
 def test_v9_routes_are_registered(app_client):
-    openapi = app_client.get("/openapi.json").json()
+    # /openapi.json is disabled by default (finding A2) — the route surface
+    # is still introspectable in-process via app.openapi(), independent of
+    # whether the HTTP endpoint is publicly exposed.
+    import glc.main as m
+
+    openapi = m.app.openapi()
     paths = set(openapi["paths"].keys())
     for p in [
         "/v1/chat",
@@ -29,7 +34,9 @@ def test_v9_routes_are_registered(app_client):
 
 
 def test_new_s11_routes_are_registered(app_client):
-    openapi = app_client.get("/openapi.json").json()
+    import glc.main as m
+
+    openapi = m.app.openapi()
     paths = set(openapi["paths"].keys())
     for p in [
         "/v1/transcribe",
@@ -42,27 +49,31 @@ def test_new_s11_routes_are_registered(app_client):
         assert p in paths
 
 
-def test_v1_providers_shape_unchanged(app_client):
-    body = app_client.get("/v1/providers").json()
+def test_v1_providers_shape_unchanged(app_client, install_token):
+    h = {"Authorization": f"Bearer {install_token}"}
+    body = app_client.get("/v1/providers", headers=h).json()
     # V9 shape: order, providers, shortcuts, limits, models
     for k in ("order", "providers", "shortcuts", "limits", "models"):
         assert k in body
 
 
-def test_v1_status_shape_unchanged(app_client):
-    body = app_client.get("/v1/status").json()
+def test_v1_status_shape_unchanged(app_client, install_token):
+    h = {"Authorization": f"Bearer {install_token}"}
+    body = app_client.get("/v1/status", headers=h).json()
     for k in ("order", "live", "today", "limits"):
         assert k in body
 
 
-def test_v1_capabilities_returns_per_provider_caps(app_client):
-    body = app_client.get("/v1/capabilities").json()
+def test_v1_capabilities_returns_per_provider_caps(app_client, install_token):
+    h = {"Authorization": f"Bearer {install_token}"}
+    body = app_client.get("/v1/capabilities", headers=h).json()
     # Even with zero providers wired, the shape must be a dict.
     assert isinstance(body, dict)
 
 
-def test_v1_cost_by_agent_returns_dict(app_client):
-    body = app_client.get("/v1/cost/by_agent").json()
+def test_v1_cost_by_agent_returns_dict(app_client, install_token):
+    h = {"Authorization": f"Bearer {install_token}"}
+    body = app_client.get("/v1/cost/by_agent", headers=h).json()
     assert isinstance(body, dict)
 
 

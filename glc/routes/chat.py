@@ -763,7 +763,10 @@ async def list_embedders(request: Request):
 
 
 @router.get("/v1/cost/by_agent")
-async def cost_by_agent(session: str | None = None, agent: str | None = None):
+async def cost_by_agent(
+    session: str | None = None, agent: str | None = None, authorization: str | None = Header(default=None)
+):
+    require_install_token(authorization)
     from glc import pricing as _pricing
 
     raw = db.by_agent(session=session)
@@ -780,7 +783,8 @@ async def cost_by_agent(session: str | None = None, agent: str | None = None):
 
 
 @router.get("/v1/providers")
-async def list_providers(request: Request):
+async def list_providers(request: Request, authorization: str | None = Header(default=None)):
+    require_install_token(authorization)
     r = request.app.state.router
     return {
         "order": r.order,
@@ -792,7 +796,8 @@ async def list_providers(request: Request):
 
 
 @router.get("/v1/capabilities")
-async def capabilities(request: Request):
+async def capabilities(request: Request, authorization: str | None = Header(default=None)):
+    require_install_token(authorization)
     r = request.app.state.router
     out = {}
     for name, p in r.providers.items():
@@ -811,7 +816,8 @@ async def capabilities(request: Request):
 
 
 @router.get("/v1/status")
-async def status(request: Request):
+async def status(request: Request, authorization: str | None = Header(default=None)):
+    require_install_token(authorization)
     r = request.app.state.router
     return {
         "order": r.order,
@@ -836,5 +842,11 @@ async def routers(request: Request):
 
 
 @router.get("/v1/calls")
-async def calls(limit: int = 100, provider: str | None = None, status: str | None = None):
+async def calls(
+    limit: int = 100,
+    provider: str | None = None,
+    status: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    require_install_token(authorization)
     return db.recent(limit=limit, provider=provider, status=status)
