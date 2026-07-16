@@ -80,6 +80,29 @@ INSTALL_TOKEN_ENV = "GLC_INSTALL_TOKEN"
 _token_hash: str | None = None
 _sealed = False
 
+# Finding B3: the key that signs pairing records (glc/security/pairing.py).
+# It is derived from the install token's PLAINTEXT and kept only in memory --
+# deliberately NOT from anything on disk. Deriving it from the stored sha256
+# would be pointless: that hash sits in install_token, so in-process code
+# could re-derive the key and forge pairings at will.
+#
+# Consequence: the key exists only when seal_install_token() sees a plaintext
+# (i.e. GLC_INSTALL_TOKEN is supplied, or the token was just generated /
+# migrated). A deployment that supplies GLC_INSTALL_TOKEN gets it on every
+# boot, so signatures stay stable across restarts. With no plaintext there is
+# no key, and pairing.py falls back to unsigned mode (see its header).
+_pairing_key: str | None = None
+
+
+def _derive_pairing_key(tok: str) -> str:
+    return hashlib.sha256(f"{tok.strip()}:glc-pairing-signing-v1".encode()).hexdigest()
+
+
+def pairing_signing_key() -> str | None:
+    """The in-memory pairing signing key, or None if this process never saw
+    the token plaintext."""
+    return _pairing_key
+
 
 def install_token_path() -> Path:
     return CONFIG_DIR / "install_token"
@@ -122,12 +145,13 @@ def seal_install_token() -> str | None:
     the token came from GLC_INSTALL_TOKEN (the operator already knows it) or
     from an existing installation.
     """
-    global _token_hash, _sealed
+    global _token_hash, _sealed, _pairing_key
 
     # 1. operator-supplied (env / Modal Secret) — scrub it like a provider key.
     env_tok = os.environ.pop(INSTALL_TOKEN_ENV, None)
     if env_tok and env_tok.strip():
         _token_hash = _hash_token(env_tok)
+        _pairing_key = _derive_pairing_key(env_tok)  # B3
         _write_hash(_token_hash)
         _sealed = True
         return None
@@ -136,12 +160,14 @@ def seal_install_token() -> str | None:
     if p.exists():
         stored = p.read_text().strip()
         if _looks_hashed(stored):
-            # 2a. already migrated.
+            # 2a. already migrated. No plaintext here, so no pairing key can be
+            # derived -- any key from an earlier seal in this process is kept.
             _token_hash = stored
         else:
             # 2b. legacy plaintext -> hash in place. The existing token stays
             # valid; only its recoverable copy goes away.
             _token_hash = _hash_token(stored)
+            _pairing_key = _derive_pairing_key(stored)  # B3
             _write_hash(_token_hash)
         _sealed = True
         return None
@@ -149,6 +175,7 @@ def seal_install_token() -> str | None:
     # 3. fresh install: generate, show once, keep only the hash.
     tok = secrets.token_urlsafe(32)
     _token_hash = _hash_token(tok)
+    _pairing_key = _derive_pairing_key(tok)  # B3
     _write_hash(_token_hash)
     _sealed = True
     return tok
@@ -187,9 +214,10 @@ def verify_install_token(presented: str | None) -> bool:
 def rotate_install_token() -> str:
     """Mint a fresh token, store only its hash, and return the plaintext once.
     The only way back in if the operator loses the token."""
-    global _token_hash, _sealed
+    global _token_hash, _sealed, _pairing_key
     tok = secrets.token_urlsafe(32)
     _token_hash = _hash_token(tok)
+    _pairing_key = _derive_pairing_key(tok)  # B3
     _write_hash(_token_hash)
     _sealed = True
     return tok

@@ -356,3 +356,73 @@ uv run modal secret create glc-install-token GLC_INSTALL_TOKEN=<pick-a-strong-va
 If you instead let the existing Volume token migrate, **save your current
 token first** — after the migration it is a hash and cannot be recovered
 (recover by rotating).
+
+---
+
+## B3 — In-process escalation to owner (leak 3)
+
+**Invariant restored:** 2 — *every action must be checked against the actual
+user*. `owner_paired` is the top trust level; granting it to yourself defeats
+every allowlist downstream.
+**Attacker role:** 3–4 — any code sharing the gateway process.
+
+**The bug — two doors, not one.** `force_pair_owner()` is an installer
+method whose only guard was a docstring ("Not exposed through HTTP" — true,
+and irrelevant). Every adapter shares the process, so:
+
+```python
+get_pairing_store().force_pair_owner("telegram", "attacker-id", user_handle="me")
+```
+
+But gating that method alone would have been **theatre**, because
+`pairings.sqlite` has the same OS-layer writability as the audit db and
+`lookup()` trusted whatever `trust_level` it found:
+
+```python
+sqlite3.connect("pairings.sqlite").execute(
+    "INSERT OR REPLACE INTO pairings VALUES ('telegram','attacker','me','owner_paired',...)")
+```
+
+Same escalation, method untouched. **Both** doors are closed here.
+
+**The fix.**
+
+1. **The method needs the installer's capability.** `force_pair_owner()` now
+   requires the install token. After B4 the gateway keeps only
+   `sha256(token)`, so in-process code cannot produce one. Grants **and**
+   refusals are audited into B2's tamper-evident log, so escalation is never
+   silent. Installer/setup scripts running in their *own* process pass it
+   explicitly or via `GLC_INSTALL_TOKEN` — a fallback that is safe inside the
+   gateway, since `seal_install_token()` scrubs that variable at boot and any
+   value still has to verify against the stored hash.
+2. **Rows are signed, and unsigned rows are inert.** Every pairing carries an
+   HMAC over its contents — *including `trust_level`*, so a row cannot be
+   edited from `user_paired` up to `owner_paired`. `lookup()`, `owners()` and
+   `all_pairings()` **refuse** rows that do not verify, so a row inserted
+   straight into SQLite isn't merely detected — it does not work.
+   `verify_pairings()` reports forged rows (mirroring B2's `verify_chain()`).
+3. `_migrate_unsigned_rows()` signs an existing installation's rows **once**
+   (guarded by `pairing_meta`), so upgrading doesn't lock the owner out —
+   and, because it runs only once, a row an attacker inserts *after* the
+   migration is never legitimised by a later restart.
+
+**The key.** `config.pairing_signing_key()` is derived from the install
+token's **plaintext** and held only in memory — deliberately *not* from
+anything on disk. Deriving it from the stored `sha256` would be pointless:
+that hash sits in `install_token`, so in-process code could re-derive the key
+and forge at will. With no plaintext (local dev, legacy install) there is no
+key and the store runs in **unsigned mode** — signing is neither written nor
+enforced. That is why a real deployment should supply `GLC_INSTALL_TOKEN`.
+
+**Verified.** `tests/test_b3_pairing_escalation.py` (11 tests) drives both
+exploits: the method call is refused without/with a wrong token and audited;
+a directly-inserted `owner_paired` row is present in SQLite yet **inert**
+(`lookup` → None, `owners` → empty) and reported by `verify_pairings()`;
+editing a real pairing invalidates its signature. Plus the honest path (the
+installer succeeds, code-confirmed pairings sign and verify) and unsigned
+mode. Full suite 330 passed.
+
+**Honest scope.** Same ceiling as B2: the key lives in this process's memory,
+so code that goes looking can read it and forge a signature. What is closed
+is both named exploits; what remains needs the pairing store in its own
+process — exactly the component separation the notes prescribe for leak 3.

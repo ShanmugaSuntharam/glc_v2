@@ -25,6 +25,9 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.config as _cfg
 
     _cfg.CONFIG_DIR = cfg
+    _cfg._token_hash = None
+    _cfg._sealed = False
+    _cfg._pairing_key = None
     import glc.security.pairing as _p
 
     _p._singleton = None
@@ -37,4 +40,13 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.audit.store as _a
 
     _a._singleton = None
+
+    # B3/B4: force_pair_owner is an installer capability and now needs the
+    # install token; sealing also derives the pairing signing key. Mirrors the
+    # repo-level tests/conftest.py. The variable is restored after sealing
+    # (seal scrubs it) because these tests act as the installer.
+    tok = "test-install-token-for-the-suite"
+    monkeypatch.setenv(_cfg.INSTALL_TOKEN_ENV, tok)
+    _cfg.seal_install_token()
+    monkeypatch.setenv(_cfg.INSTALL_TOKEN_ENV, tok)
     yield

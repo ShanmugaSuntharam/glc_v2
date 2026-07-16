@@ -7,9 +7,12 @@ are rolled fresh.
 
 from __future__ import annotations
 
-import secrets
-
 import pytest
+
+# The suite's install token. B3/B4: the gateway keeps only sha256(token), so a
+# test cannot read one back — it supplies a known one instead, and thereby acts
+# as the installer when it calls force_pair_owner().
+TEST_INSTALL_TOKEN = "test-install-token-for-the-suite"
 
 
 @pytest.fixture(autouse=True)
@@ -25,9 +28,11 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.config as _cfg
 
     _cfg.CONFIG_DIR = cfg
-    # B4: the install token is sealed to a module-level hash; roll it per-test.
+    # B4/B3: the install token seals to a module-level hash and derives the
+    # pairing signing key; roll all of it per-test.
     _cfg._token_hash = None
     _cfg._sealed = False
+    _cfg._pairing_key = None
     import glc.security.pairing as _p
 
     _p._singleton = None
@@ -51,29 +56,46 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     yield
 
 
-@pytest.fixture
-def install_token(monkeypatch):
-    """The per-installation token, supplied to the gateway rather than read
-    back from it.
+@pytest.fixture(autouse=True)
+def _installer_token(_isolated_glc_state, monkeypatch):
+    """Seal a known install token for every test.
 
-    Finding B4: the gateway now stores only sha256(token), so there is no
-    plaintext anywhere for a test (or an attacker) to read. Tests therefore
-    hand the gateway a known token via GLC_INSTALL_TOKEN before boot; the
-    lifespan seals it (scrubbing the env var) and verifies against the hash.
-    app_client depends on this fixture so the env is always set before the
-    app's lifespan runs.
+    Two things depend on this:
+      * B4 — the routes verify against sha256(token), so the suite has to
+        supply the token rather than read one back.
+      * B3 — sealing is what derives the pairing signing key, so signing is
+        active in tests (as it is on a real deployment supplying
+        GLC_INSTALL_TOKEN) rather than silently falling back to unsigned mode.
+
+    seal_install_token() scrubs GLC_INSTALL_TOKEN from the environment, which
+    is exactly the point in production. Tests, though, legitimately act as the
+    *installer* when they call force_pair_owner(), so the variable is restored
+    afterwards — the same thing an installer script does in its own process.
     """
-    tok = "test-install-token-" + secrets.token_urlsafe(16)
-    monkeypatch.setenv("GLC_INSTALL_TOKEN", tok)
-    return tok
+    import glc.config as _cfg
+
+    monkeypatch.setenv(_cfg.INSTALL_TOKEN_ENV, TEST_INSTALL_TOKEN)
+    _cfg.seal_install_token()
+    monkeypatch.setenv(_cfg.INSTALL_TOKEN_ENV, TEST_INSTALL_TOKEN)
+    yield
 
 
 @pytest.fixture
-def app_client(install_token):
+def install_token():
+    """The token the suite sealed — supplied to the gateway, never read back."""
+    return TEST_INSTALL_TOKEN
+
+
+@pytest.fixture
+def app_client(install_token, monkeypatch):
     """TestClient pointed at a freshly-booted glc.main:app."""
     from fastapi.testclient import TestClient
 
+    import glc.config as _cfg
     import glc.main as m
 
     with TestClient(m.app) as c:
+        # The lifespan's seal scrubbed GLC_INSTALL_TOKEN again (B4). Restore it
+        # so a test that acts as the installer after boot still can.
+        monkeypatch.setenv(_cfg.INSTALL_TOKEN_ENV, install_token)
         yield c
