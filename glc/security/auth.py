@@ -10,13 +10,15 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-from glc.config import get_or_create_install_token
+from glc.config import verify_install_token
 
 
 def require_install_token(authorization: str | None) -> None:
-    expected = get_or_create_install_token()
+    # Session 12 finding B4: verify against the stored hash rather than
+    # fetching a plaintext token to compare. verify_install_token uses
+    # hmac.compare_digest, so this is also no longer a timing oracle.
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "missing bearer token (Authorization: Bearer <install_token>)")
     presented = authorization.removeprefix("Bearer ").strip()
-    if presented != expected:
+    if not verify_install_token(presented):
         raise HTTPException(403, "install token mismatch")

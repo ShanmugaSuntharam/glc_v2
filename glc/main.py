@@ -23,7 +23,7 @@ from glc import embedders as E  # noqa: E402
 from glc import providers as P  # noqa: E402
 from glc.audit import init_store as init_audit  # noqa: E402
 from glc.cache import GeminiCache  # noqa: E402
-from glc.config import get_or_create_install_token  # noqa: E402
+from glc.config import seal_install_token  # noqa: E402
 from glc.policy import reload_engine  # noqa: E402
 from glc.routes import channels as channels_route  # noqa: E402
 from glc.routes import chat as chat_route  # noqa: E402
@@ -61,7 +61,16 @@ def _install_sighup_reload() -> None:
 async def lifespan(app: FastAPI):
     db.init()
     init_audit()
-    get_or_create_install_token()
+    # Finding B4: resolve the install token once, keep only its sha256, and
+    # drop every recoverable copy (GLC_INSTALL_TOKEN scrubbed from the
+    # environment, any legacy on-disk plaintext hashed in place). A freshly
+    # generated token is returned exactly once -- the only chance to show it.
+    _fresh_token = seal_install_token()
+    if _fresh_token:
+        print(
+            "[glc] new install token (shown once, store it now — "
+            f"it cannot be recovered): {_fresh_token}"
+        )
     _install_sighup_reload()
     # Finding A4 (leak 1): pull every provider key out of os.environ into the
     # private keyvault before anything builds providers, so no in-process code

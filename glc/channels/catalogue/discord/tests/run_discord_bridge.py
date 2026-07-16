@@ -19,7 +19,6 @@ from dotenv import load_dotenv
 
 from glc.channels.catalogue.discord.adapter import Adapter
 from glc.channels.envelope import ChannelReply
-from glc.config import get_or_create_install_token
 
 # Load environment variables from .env at repository root
 load_dotenv(Path(__file__).resolve().parents[5] / ".env")
@@ -115,8 +114,14 @@ async def run_bridge():
         print("Please set it in your environment or .env file before running.", file=sys.stderr)
         return
 
-    # 1. Retrieve the GLC local install token to authorize with the GLC gateway
-    install_token = get_or_create_install_token()
+    # 1. The install token to authorize with the GLC gateway. Finding B4: the
+    # gateway stores only sha256(token), so there is no plaintext to read back
+    # -- a bridge is an adapter and must be handed its credential.
+    install_token = os.environ.get("GLC_INSTALL_TOKEN")
+    if not install_token:
+        print("GLC_INSTALL_TOKEN is not set.", file=sys.stderr)
+        print("Export the install token before running this bridge.", file=sys.stderr)
+        return
     glc_port = os.environ.get("GLC_PORT", "8111")
     glc_ws_url = f"ws://localhost:{glc_port}/v1/channels/discord?token={install_token}"
 

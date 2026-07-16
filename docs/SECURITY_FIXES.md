@@ -292,3 +292,67 @@ closes is the naive erase the finding names, and it makes any tampering that
 does not also forge the chain loudly visible. Tamper-*proof* needs the
 writer in its own process holding a key the caller cannot reach, or an
 external anchor — same root cause as B5/B6.
+
+---
+
+## B4 — Install token readable in-process (leak 4)
+
+**Invariant restored:** supports 1/2 — the control token is the operator's
+identity; anything holding it can act as the operator.
+**Attacker role:** 3–4 — any code sharing the gateway process.
+
+**The bug.** The per-installation control token sat on disk in **plaintext**
+at `~/.glc/install_token`, mode `0600`. Mode `0600` keeps other *Unix users*
+out — it does nothing about other *code running as the same user*, which is
+every adapter in the gateway process:
+
+```python
+tok = open(os.path.expanduser("~/.glc/install_token")).read().strip()
+```
+
+One line, and the caller holds the operator's credential.
+
+**The fix (store a verifier, not a secret).** The gateway never needs to
+*recover* the token — only to *verify* a presented one. So only
+`sha256(token)` is kept, on disk and in memory. Reading the file now yields a
+hash, which is useless as a bearer credential.
+
+`glc/config.py` resolves the token once at boot via `seal_install_token()`,
+from, in priority order:
+1. **`GLC_INSTALL_TOKEN`** (env / Modal Secret) — the operator picks it, so
+   they already know it and nothing ever has to hand it back. Scrubbed from
+   `os.environ` on seal, so `os.getenv()` is closed too (same move as A4).
+2. **A legacy plaintext file** — hashed **in place** on first boot, so an
+   existing installation's token keeps working while the plaintext leaves
+   disk.
+3. **Freshly generated** — returned exactly once so the operator can record
+   it; only the hash is retained.
+
+Verification uses `hmac.compare_digest`, so the check is also no longer a
+**timing oracle** (Category 11) that could leak the token a character at a
+time. `glc token --rotate` mints a new token if the operator loses theirs.
+Consumers that used to *steal* the token from disk — the twilio_sms webhook
+and the telegram/discord dev bridges — are now *given* one via
+`GLC_INSTALL_TOKEN`, which is what an adapter should always have done.
+
+**Verified.** `tests/test_b4_install_token.py` (11 tests): the disk holds a
+hash not the token, and presenting that stolen hash to the data plane and the
+WS route both fail (403 / socket closed) — the end-to-end version of leak 4;
+the env var is scrubbed after seal; a legacy plaintext file migrates in place
+with the old token still valid; fresh install shows the token once and never
+persists it; rotation invalidates the old token. Full suite 319 passed.
+
+**Honest scope.** Verification-only storage means there is no on-disk or
+in-environment copy to steal. It does not stop in-process code from reading a
+token off a request in flight, or from using `verify_install_token()` as an
+oracle (guessing a 256-bit token is infeasible). Binding the token to the
+gateway alone is, as the notes say, ultimately process separation.
+
+**⚠ Deployment note.** `modal_app.py` now attaches a `glc-install-token`
+Secret. Create it before the next deploy:
+```
+uv run modal secret create glc-install-token GLC_INSTALL_TOKEN=<pick-a-strong-value>
+```
+If you instead let the existing Volume token migrate, **save your current
+token first** — after the migration it is a hash and cannot be recovered
+(recover by rotating).

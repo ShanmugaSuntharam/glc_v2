@@ -20,7 +20,6 @@ from dotenv import load_dotenv
 
 from glc.channels.catalogue.telegram.adapter import Adapter
 from glc.channels.envelope import ChannelReply
-from glc.config import get_or_create_install_token
 from glc.security.pairing import get_pairing_store
 
 load_dotenv()
@@ -47,7 +46,17 @@ async def main() -> None:
 
     # 2. Get Gateway connection details
     gateway_port = int(os.getenv("GLC_PORT", "8111"))
-    install_token = get_or_create_install_token()
+    # Finding B4: the gateway keeps only sha256(token), so there is no
+    # plaintext to read back. A dev bridge is an adapter -- it must be handed
+    # its credential like any other client.
+    install_token = os.getenv("GLC_INSTALL_TOKEN")
+    if not install_token:
+        print(
+            "[live_poll] GLC_INSTALL_TOKEN is not set. Export the install token "
+            "(shown once when the gateway first booted, or `glc token --rotate`).",
+            file=sys.stderr,
+        )
+        return
 
     # Instantiate the adapter
     adapter = Adapter()

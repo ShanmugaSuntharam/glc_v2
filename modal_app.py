@@ -106,11 +106,21 @@ PROVIDER_SECRET_NAMES = [
 ]
 llm_secrets = [modal.Secret.from_name(n) for n in PROVIDER_SECRET_NAMES]
 
+# Finding B4 (leak 4): the install token used to sit on the Volume in
+# plaintext, so any in-process code could read it and act as the operator. The
+# gateway now keeps only sha256(token) and verifies against that, so there is
+# nothing recoverable on disk. Supplying the token here means YOU choose it and
+# already know it -- the gateway never has to hand it back:
+#   uv run modal secret create glc-install-token GLC_INSTALL_TOKEN=<pick-a-strong-value>
+# glc.config.seal_install_token() scrubs it from os.environ at boot (same move
+# as A4), so in-process code cannot os.getenv() it either.
+install_token_secret = modal.Secret.from_name("glc-install-token")
+
 
 @app.function(
     image=image,
     volumes={"/data": data_volume},
-    secrets=llm_secrets,
+    secrets=[*llm_secrets, install_token_secret],
     min_containers=0,  # scale to zero when idle -> protects the free tier
     # Finding A6: the audit / pairing / cost databases are SQLite files on the
     # shared Volume. SQLite is a single-writer store and a Modal Volume is not

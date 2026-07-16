@@ -84,9 +84,15 @@ async def gateway_roundtrip(
     """
     import websockets
 
-    from glc.config import get_or_create_install_token
-
-    token = token or get_or_create_install_token()
+    # Session 12 finding B4: an adapter must be *given* its credential, not
+    # help itself to the gateway's. Reading the gateway's install token from
+    # disk was the leak; the token now arrives explicitly or via
+    # GLC_INSTALL_TOKEN, and there is no plaintext on disk to fall back to.
+    token = token or os.getenv("GLC_INSTALL_TOKEN")
+    if not token:
+        raise RuntimeError(
+            "no install token: pass token=... or set GLC_INSTALL_TOKEN for this adapter"
+        )
     uri = f"ws://{host}:{port}/v1/channels/{envelope.channel}"
     async with websockets.connect(uri, additional_headers={"Authorization": f"Bearer {token}"}) as ws:
         await ws.send(envelope.model_dump_json())
