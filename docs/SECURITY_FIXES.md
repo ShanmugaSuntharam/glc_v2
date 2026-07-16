@@ -10,13 +10,21 @@ commit messages; this file starts the durable log at A4.
 
 ---
 
-## A4 — One Secret for the whole Function (leak 1)
+## A4 — One Secret for the whole Function (leak 1; also closes B1)
 
 **Invariant restored:** 1 — *adapters must never see provider API keys*
 (shared-process environment vector).
 **Attacker role:** 3–4 — a compromised adapter / any code executing in the
 gateway process (a poisoned dependency, agent-generated code, or an
 SSRF→RCE foothold).
+
+**Also closes B1.** B1 in the Section-7 in-process leak list *is* this same
+vulnerability — the notes label it "env holds all keys (=A4)": all provider
+keys readable from `os.environ` by any code sharing the gateway process.
+The fix below is what closes it: after `keyvault.seal()`,
+`os.getenv("GEMINI_API_KEY")` (and `/proc/self/environ`) no longer yield the
+key in-process, so the B1 read fails too. One fix, both findings — A4 (the
+Modal single-Secret shape) and B1 (the in-process env read).
 
 **The bug.** Move 1 delivered all provider keys through a single Modal
 Secret (`glc-llm-keys`) mounted on the whole gateway Function, so every key
