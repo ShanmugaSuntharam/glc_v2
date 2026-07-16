@@ -14,6 +14,7 @@ import asyncio as _asyncio
 import json
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -352,6 +353,40 @@ async def _resolve_image_urls(messages):
     return out
 
 
+# ─────────────────────── finding C4: upstream errors ───────────────────────
+# /v1/chat used to hand the caller the raw provider exception and the provider
+# name -- "all providers unavailable. attempts: [...] last_error: <raw>". That
+# is free reconnaissance: it names which providers are configured and in what
+# order, and the raw error carries the upstream endpoint (this is how the class
+# notes established the Function could reach googleapis.com), library versions,
+# and sometimes request URLs with credentials in them. An error is a channel,
+# and this one was talking.
+#
+# The detail is not lost -- it goes where it is useful (the audit log and the
+# call ledger, which already records provider/model/error) and the caller gets
+# a generic message plus a correlation ref to quote to an operator.
+
+
+def _upstream_error(status: int, message: str, *, detail: str, agent: str | None = None) -> HTTPException:
+    """Audit the real cause, return a sanitised HTTPException carrying only a
+    ref the operator can look up."""
+    ref = uuid.uuid4().hex[:12]
+    try:
+        from glc.audit import append as audit_append
+
+        audit_append(
+            channel="_system",
+            channel_user_id=agent or "_api",
+            trust_level="untrusted",
+            event_type="upstream_error",
+            params={"ref": ref, "status": status},
+            result={"detail": detail[:1000]},
+        )
+    except Exception:
+        pass
+    return HTTPException(status, f"{message} (ref: {ref})")
+
+
 def _validate_structured(text: str, schema: dict):
     try:
         obj = json.loads(text)
@@ -492,7 +527,12 @@ async def chat(req: ChatRequest, request: Request, authorization: str | None = H
                             session=req.session,
                             retries=retries,
                         )
-                        yield f"data: {json.dumps({'error': str(e)[:300]})}\n\n"
+                        # C4: the stream gets the same sanitised error as the
+                        # non-streaming path -- a ref, not the upstream's words.
+                        _err = _upstream_error(
+                            502, "upstream provider error", detail=f"{name} failed: {e}", agent=req.agent
+                        )
+                        yield f"data: {json.dumps({'error': str(_err.detail)})}\n\n"
 
                 return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -626,7 +666,10 @@ async def chat(req: ChatRequest, request: Request, authorization: str | None = H
                 tag += f" → backoff {secs:.0f}s ({reason})"
             all_attempts.append({"provider": name, "reason": tag})
             if explicit_override or not getattr(e, "retryable", True):
-                raise HTTPException(502, f"{name} failed: {e}")
+                # C4: the caller does not get the provider's raw error.
+                raise _upstream_error(
+                    502, "upstream provider error", detail=f"{name} failed: {e}", agent=req.agent
+                )
             candidates = [c for c in candidates if c != name]
             continue
         except HTTPException:
@@ -651,11 +694,20 @@ async def chat(req: ChatRequest, request: Request, authorization: str | None = H
             )
             all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:120]}"})
             if explicit_override:
-                raise HTTPException(502, f"{name} failed: {e}")
+                raise _upstream_error(
+                    502, "upstream provider error", detail=f"{name} failed: {e}", agent=req.agent
+                )
             candidates = [c for c in candidates if c != name]
             continue
 
-    raise HTTPException(503, f"all providers unavailable. attempts: {all_attempts}. last_error: {last_err}")
+    # C4: this line was the reconnaissance gift -- it named every provider
+    # tried, in order, with the raw upstream error attached.
+    raise _upstream_error(
+        503,
+        "no provider could serve this request",
+        detail=f"all providers unavailable. attempts: {all_attempts}. last_error: {last_err}",
+        agent=req.agent,
+    )
 
 
 @router.post("/v1/chat/batch")
@@ -668,11 +720,24 @@ async def chat_batch(
     async def _one(call: ChatRequest):
         async with sem:
             try:
-                return await chat(call, request)
+                # A1 fix-up (same bug as /v1/vision): this inner call never
+                # forwarded the header, so chat() received FastAPI's
+                # Header(default=None) SENTINEL OBJECT instead of a string and
+                # raised AttributeError on .startswith -- every batch entry
+                # came back as a 500. It failed closed, but the endpoint has
+                # been dead since A1.
+                return await chat(call, request, authorization)
             except HTTPException as he:
+                # he.detail is already sanitised by _upstream_error.
                 return {"error": str(he.detail), "status_code": he.status_code}
             except Exception as e:
-                return {"error": str(e)[:400], "status_code": 500}
+                # C4: never hand the caller a raw internal exception -- that is
+                # exactly how the A1 regression above announced itself. Still a
+                # per-entry dict, so one bad call does not fail the batch.
+                err = _upstream_error(
+                    500, "internal error", detail=f"batch entry failed: {e}", agent=call.agent
+                )
+                return {"error": str(err.detail), "status_code": 500}
 
     results = await _asyncio.gather(*[_one(c) for c in req.calls])
     return {"results": results}
@@ -741,13 +806,23 @@ async def embed(req: EmbedRequest, request: Request, authorization: str | None =
             override=req.provider,
             call_role="embed",
         )
+        # C4: same treatment as /v1/chat — the caller learns the shape of the
+        # failure, not the upstream's words. 429 keeps its status so clients
+        # can back off correctly; 400 is the caller's own bad input, so it is
+        # safe (and useful) to say so.
         if req.provider:
             if e.status == 429:
-                raise HTTPException(429, f"{req.provider} rate-limited: {e}")
+                raise _upstream_error(
+                    429, "upstream provider rate-limited", detail=f"{req.provider}: {e}"
+                ) from None
             if e.status == 400:
-                raise HTTPException(400, str(e))
-            raise HTTPException(502, f"{req.provider} embed failed: {e}")
-        raise HTTPException(503, str(e))
+                raise HTTPException(400, str(e)) from None
+            raise _upstream_error(
+                502, "upstream embed error", detail=f"{req.provider} embed failed: {e}"
+            ) from None
+        raise _upstream_error(
+            503, "no embedding provider could serve this request", detail=str(e)
+        ) from None
 
     db.log_call(
         provider=name,

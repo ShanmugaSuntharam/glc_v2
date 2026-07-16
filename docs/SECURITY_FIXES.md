@@ -732,3 +732,50 @@ credentials with an expiry — that is invariant 4's "a credential must work
 only for one specific tool call", a real feature (issuance, refresh,
 revocation) rather than a hardening, and it belongs with the agent runtime in
 a later session. The install token remains long-lived by design.
+
+---
+
+## C4 — Verbose upstream errors
+
+**Invariant restored:** supports the whole set — an error is a channel, and
+this one was talking.
+**Attacker role:** 2 — anyone who can make one request and read the reply.
+
+**The bug.** `/v1/chat` handed the caller the raw provider exception and the
+provider name:
+
+```
+all providers unavailable. attempts: [{"provider": "gemini", ...}]. last_error: <raw upstream error>
+```
+
+Free reconnaissance: it names **which providers are configured and in what
+order**, and the raw error carries the upstream endpoint — this is precisely
+how the class notes established the Function could reach `googleapis.com` —
+plus library versions and sometimes request URLs with credentials in them. An
+attacker maps your provider stack with one malformed request.
+
+**The fix.** `_upstream_error()` in `glc/routes/chat.py`: the detail is
+**moved, not lost**. The caller gets a generic message plus a short
+correlation **ref**; the full cause is written to the audit log (and the call
+ledger already records provider/model/error), so an operator can look the ref
+up and see everything. Applied to `/v1/chat` (both the explicit-provider and
+all-providers-failed branches), the SSE streaming path, `/v1/embed`, and the
+`/v1/chat/batch` per-entry errors. A `400` stays verbatim — that is the
+caller's own bad input, so saying so is useful and leaks nothing — and `429`
+keeps its status so clients back off correctly.
+
+**Verified.** `tests/test_c4_error_disclosure.py` (8 tests): the chat error
+names no provider, endpoint, `attempts` or `last_error`; it carries a ref; the
+real cause **is** audited; the ref the client got **matches** an audited ref
+(so it is actually usable); embed and batch errors are sanitised too.
+Full suite 405 passed.
+
+**⚠ Second instance of the A1 regression, found here.** `/v1/chat/batch`
+called `await chat(call, request)` **without forwarding `authorization`** —
+the same mistake as `/v1/vision` (see C1). Every batch entry came back as
+`{"error": "'Header' object has no attribute 'startswith'", "status_code":
+500}`. So **two** data-plane endpoints have been dead since A1, and this one
+was *also* a C4-class disclosure: it handed the caller a raw internal
+`AttributeError`. Both are now fixed and pinned by tests. The lesson is the
+finding's own: the endpoint announced its internal state to anyone who asked,
+which is exactly why raw exceptions must not reach a client.
