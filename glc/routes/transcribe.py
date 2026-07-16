@@ -5,9 +5,10 @@ from __future__ import annotations
 import base64
 from typing import Literal
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from glc.security import quota
 from glc.security.auth import require_install_token
 from glc.voice.stt import STTError, transcribe
 
@@ -30,8 +31,11 @@ class TranscribeResponse(BaseModel):
 
 
 @router.post("/v1/transcribe", response_model=TranscribeResponse)
-async def transcribe_route(req: TranscribeRequest, authorization: str | None = Header(default=None)):
+async def transcribe_route(
+    req: TranscribeRequest, request: Request, authorization: str | None = Header(default=None)
+):
     require_install_token(authorization)
+    quota.enforce_http("/v1/transcribe", request)  # C5: paid provider call — bound it
     try:
         audio = base64.b64decode(req.audio_b64)
     except Exception as e:

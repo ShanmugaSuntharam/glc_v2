@@ -367,6 +367,20 @@ async def _resolve_image_urls(messages):
 # a generic message plus a correlation ref to quote to an operator.
 
 
+def _enforce_quota(endpoint: str, request: Request, agent: str | None = None) -> None:
+    """Finding C5: gate every paid data-plane request on the rate limits and
+    the daily budget before anything reaches a provider.
+
+    Deliberately applied in chat() rather than in vision()/chat_batch(): both
+    of those call chat() internally, so they inherit it -- and a batch of N
+    correctly counts as N requests, which is the point, since batch
+    amplification is itself the denial-of-wallet vector.
+    """
+    from glc.security import quota
+
+    quota.enforce_http(endpoint, request, agent=agent)
+
+
 def _upstream_error(status: int, message: str, *, detail: str, agent: str | None = None) -> HTTPException:
     """Audit the real cause, return a sanitised HTTPException carrying only a
     ref the operator can look up."""
@@ -402,6 +416,7 @@ def _validate_structured(text: str, schema: dict):
 @router.post("/v1/chat")
 async def chat(req: ChatRequest, request: Request, authorization: str | None = Header(default=None)):
     require_install_token(authorization)
+    _enforce_quota("/v1/chat", request, req.agent)  # C5
     state = request.app.state
     rtr = state.router
     router_pool = state.router_pool
@@ -774,6 +789,7 @@ async def vision(req: VisionRequest, request: Request, authorization: str | None
 @router.post("/v1/embed")
 async def embed(req: EmbedRequest, request: Request, authorization: str | None = Header(default=None)):
     require_install_token(authorization)
+    _enforce_quota("/v1/embed", request)  # C5
     from glc import embedders as E
 
     state = request.app.state

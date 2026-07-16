@@ -39,6 +39,11 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.security.rate_limits as _r
 
     _r._limiter = None
+    # C5: the data-plane rate windows are process-global; roll them per-test so
+    # one test's requests never exhaust another's budget.
+    import glc.security.quota as _q
+
+    _q.reset()
     import glc.policy.engine as _e
 
     _e._engine = None

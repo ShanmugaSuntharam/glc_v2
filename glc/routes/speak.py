@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
+from glc.security import quota
 from glc.security.auth import require_install_token
 from glc.voice.tts import TTSError, synthesize
 
@@ -29,8 +30,11 @@ class SpeakResponse(BaseModel):
 
 
 @router.post("/v1/speak", response_model=SpeakResponse)
-async def speak_route(req: SpeakRequest, authorization: str | None = Header(default=None)):
+async def speak_route(
+    req: SpeakRequest, request: Request, authorization: str | None = Header(default=None)
+):
     require_install_token(authorization)
+    quota.enforce_http("/v1/speak", request)  # C5: paid provider call — bound it
     try:
         r = await synthesize(req.text, voice_id=req.voice_id, prefer=req.prefer)
     except TTSError as e:

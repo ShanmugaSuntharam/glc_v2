@@ -779,3 +779,62 @@ was *also* a C4-class disclosure: it handed the caller a raw internal
 `AttributeError`. Both are now fixed and pinned by tests. The lesson is the
 finding's own: the endpoint announced its internal state to anyone who asked,
 which is exactly why raw exceptions must not reach a client.
+
+---
+
+## C5 — No rate limits or budget on the public data plane
+
+**Invariant restored:** 8 — *every run must have hard limits on time, tokens,
+tool calls, and cost*.
+**Attacker role:** 2 — anyone holding the install token. **Denial-of-service
+and denial-of-wallet on a shared account.**
+
+**The bug.** There *was* a `RateLimiter` — but it only ever guarded the
+**channel** path (`glc/security/rate_limits.py`, keyed on channel +
+channel_user_id). The data plane — `/v1/chat`, `/chat/batch`, `/vision`,
+`/embed`, `/speak`, `/transcribe` — had **neither a rate limit nor a spend
+cap**. Loop on `/v1/chat` and the gateway faithfully relays every call to a
+paid provider until the account is drained. On the class's shared Modal
+account that is everyone's problem, not just yours.
+
+**The fix.** `glc/security/quota.py`, enforced on every paid endpoint. Three
+limits, because they stop different things:
+
+1. **Per-caller rate limit** (keyed on client IP) — stops one noisy client.
+2. **Global rate limit** — the data plane has exactly **one credential**, so
+   every caller is the same principal to us. A per-IP limit alone is evaded by
+   rotating IPs; the global cap is what actually protects the account.
+3. **Daily budget, in dollars — the one that matters.** Rate limits bound the
+   *rate* of spend, not the *total*: a slow attacker under every rate limit
+   still empties the account, just politely. The budget is computed from the
+   cost ledger (`glc/db.py`) priced through `glc/pricing.py`, and is checked
+   **before** the provider call — a wall, not a report.
+
+Tunable via `GLC_DATA_PLANE_RPM` (60), `GLC_DATA_PLANE_GLOBAL_RPM` (240),
+`GLC_DAILY_BUDGET_USD` (10.0); `0` disables a given check. Both limits audit
+when they bite (`rate_limit_exceeded`, `budget_exhausted`) — a client
+hammering the gateway is a security event, not just a noisy one.
+
+**A deliberate placement.** The quota is enforced **inside `chat()`**, not in
+`vision()`/`chat_batch()`. Both of those call `chat()` internally, so they
+inherit it — and a **batch of N correctly costs N**, which is the point:
+batch amplification *is* the denial-of-wallet vector, so charging it as one
+request would have left the hole open.
+
+**Verified.** `tests/test_c5_quota.py` (16 tests): the per-caller limit bites;
+**the global cap catches IP rotation** (a fresh IP per request still hits the
+wall); zero disables a check; the budget blocks when exhausted and stops the
+data plane with a 429 *before* any provider call; both are audited; a batch of
+4 under a limit of 2 has its later entries refused; a **broken ledger degrades
+to rate-limits-only rather than taking the data plane down**; unauthenticated
+requests are rejected at 401 *before* the quota, so a stranger cannot burn a
+real caller's rate budget; `/healthz` stays unlimited. Full suite 421 passed.
+
+**Honest scope.** The budget reads the ledger B7 hardened, so it is exactly as
+trustworthy as that — in-gateway code able to forge ledger rows can also make
+the gateway believe it has spent nothing. Costs are **estimated** from token
+counts via `pricing.py`, not reconciled against provider invoices, so the cap
+is approximate; it is a safety net against a runaway loop or a hostile caller,
+not an accounting control. The per-IP key trusts `request.client.host`, which
+behind a proxy may be the proxy — the global cap is the backstop for exactly
+that case.
