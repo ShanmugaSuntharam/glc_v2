@@ -41,9 +41,12 @@ def test_store_exposes_no_update_or_delete():
     assert len([n for n in public if n in ("update", "delete", "modify")]) == 0
 
 
-def test_schema_version_is_one():
+def test_schema_version_is_two():
+    """v2 = finding B2: audit_log gained prev_hash/row_hash and the
+    audit_chain_head anchor. Bumped from 1 with a documented migration
+    (glc/audit/store.py::_migrate)."""
     init_store()
-    assert schema_version() == 1
+    assert schema_version() == 2
 
 
 def test_query_filters_by_session_and_channel():

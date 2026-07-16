@@ -233,3 +233,62 @@ rows, or attributing a genuine call to another agent — those numbers pass
 every check here. Closing that needs a signed writer the gateway alone
 holds, plus process separation (capstone scope, same root cause as B5/B6:
 one process, no walls).
+
+---
+
+## B2 — Audit db writable at the OS layer (leak 2)
+
+**Invariant restored:** 7 — *components must not be able to edit or delete
+their own audit logs*.
+**Attacker role:** 3–4 — any code sharing the gateway process.
+
+**The bug.** The application layer exposed only `append()` — no update, no
+delete — but that is a promise made in Python, not one the filesystem
+enforces. The audit db is a plain SQLite file, writable by anything running
+as the same user, which is every adapter:
+
+```python
+sqlite3.connect("~/.glc/audit.sqlite").execute("DELETE FROM audit_log")
+```
+
+The security history is gone, silently, with nothing left to show it ever
+existed.
+
+**The fix (tamper-evident hash chain + anchor).** Schema **v1 → v2**:
+
+1. `glc/audit/schema.sql` — `audit_log` gains `prev_hash` / `row_hash`, and
+   a new one-row `audit_chain_head` table anchors the expected head hash and
+   row count.
+2. `glc/audit/store.py` — `append()` now reads the head, computes
+   `row_hash = sha256(prev_hash + every field of the row)`, inserts the
+   chained row and advances the anchor — all inside one `BEGIN IMMEDIATE`
+   transaction under a process lock, so the anchor can never drift from the
+   table or fork under concurrent appends.
+3. `verify_chain()` recomputes the whole chain and reports precisely what
+   went wrong: `row_modified`, `chain_broken`, `rows_missing`,
+   `head_mismatch`, or `table_missing`.
+4. `_migrate()` ALTERs a live v1 `audit_log` up to v2 (`CREATE TABLE IF NOT
+   EXISTS` cannot add columns to an existing table). Pre-migration rows keep
+   NULL hashes and are reported as `legacy_rows` — unverifiable, but not
+   mistaken for tampering.
+
+**Why the anchor matters.** A hash chain *inside* the table cannot detect a
+wholesale `DELETE FROM audit_log` — an empty table chains vacuously. The
+anchor is what catches it: the rows are gone, but the head still remembers
+how many there should have been.
+
+**Verified.** `tests/test_b2_audit_chain.py` (13 tests) drives the real
+exploit — raw `sqlite3.connect()` against the same file, exactly as leak 2
+does — and asserts detection of: the wholesale `DELETE` (the named exploit),
+a single-row deletion, an in-place row modification, tail truncation, a
+`DROP TABLE`, and a forged row inserted without extending the chain. Plus
+the honest path (chain verifies, rows link, `query()` unaffected) and the
+v1→v2 migration. Full suite 308 passed.
+
+**Honest scope.** This makes tampering **detectable, not impossible**. The
+hash is unkeyed and the anchor lives in the same file, so in-process code
+can still delete rows *and* recompute the chain and anchor to match. What it
+closes is the naive erase the finding names, and it makes any tampering that
+does not also forge the chain loudly visible. Tamper-*proof* needs the
+writer in its own process holding a key the caller cannot reach, or an
+external anchor — same root cause as B5/B6.
