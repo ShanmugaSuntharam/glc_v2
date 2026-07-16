@@ -22,34 +22,41 @@ app = modal.App("glc-v1-gateway")
 # audit/schema.sql, and the channel catalogue.
 LOCAL_GLC = Path(__file__).parent / "glc"
 
-# The image = a Linux box with Python 3.11, the same dependencies as
-# pyproject.toml, the glc package copied in, and GLC_CONFIG_DIR pointed at the
-# Volume mount so all databases land on persistent storage instead of the
-# throwaway container filesystem.
+# Finding A5 (non-reproducible image): build from pinned inputs, not rolling
+# ones, so every build is byte-reproducible and cannot drift under us.
 #
-# This is a function, not a plain module-level Image, because of finding
-# A3: glc.sandbox.dispatch calls it again for every per-adapter Sandbox it
-# creates. add_local_dir's mount was found (during live verification) to
-# not reliably carry over when a Function's already-hydrated Image object
-# is reused to create a brand new Sandbox - "import glc" failed inside the
-# sandbox even though the same object worked fine for the Function itself.
-# Rebuilding the Image fresh for each Sandbox.create() call (exactly like
-# building it fresh here for the Function) avoids that entirely.
+#  * BASE_IMAGE is the official python:3.11-slim-bookworm pinned to an
+#    immutable content digest, replacing the rolling `debian_slim`. Refresh
+#    the digest when deliberately bumping the base, e.g.:
+#      TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/python:pull" | python -c "import sys,json;print(json.load(sys.stdin)['token'])")
+#      curl -sI -H "Authorization: Bearer $TOKEN" \
+#        -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+#        https://registry-1.docker.io/v2/library/python/manifests/3.11-slim-bookworm \
+#        | grep -i docker-content-digest
+#
+#  * REQUIREMENTS_LOCK is the fully pinned, hash-verified export of uv.lock
+#    (exact == versions for the whole transitive closure), replacing the
+#    ">=" ranges that were re-resolved on every build. Regenerate after any
+#    dependency change with:
+#      uv export --frozen --no-dev --no-emit-project --format requirements-txt \
+#        -o requirements.lock.txt
+BASE_IMAGE = "python:3.11-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba"
+REQUIREMENTS_LOCK = Path(__file__).parent / "requirements.lock.txt"
+
+
+# build_image is a function, not a plain module-level Image, because of
+# finding A3: glc.sandbox.dispatch calls it again for every per-adapter
+# Sandbox it creates. add_local_dir's mount was found (during live
+# verification) to not reliably carry over when a Function's already-hydrated
+# Image object is reused to create a brand new Sandbox - "import glc" failed
+# inside the sandbox even though the same object worked fine for the Function
+# itself. Rebuilding the Image fresh for each Sandbox.create() call (exactly
+# like building it fresh here for the Function) avoids that entirely -- and
+# with A5's pinned inputs each of those rebuilds is identical.
 def build_image() -> modal.Image:
     return (
-        modal.Image.debian_slim(python_version="3.11")
-        .pip_install(
-            "fastapi>=0.110",
-            "uvicorn[standard]>=0.27",
-            "httpx>=0.27",
-            "python-dotenv>=1.0",
-            "pydantic>=2.6",
-            "jsonschema>=4.21",
-            "pyyaml>=6.0",
-            "websockets>=12.0",
-            "twilio>=9.0",
-            "modal>=1.5.1",
-        )
+        modal.Image.from_registry(BASE_IMAGE)
+        .pip_install_from_requirements(str(REQUIREMENTS_LOCK))
         # GLC_ADAPTER_SANDBOX=1: Session 12, finding A3. glc/routes/channels.py
         # runs channel-adapter code in its own Modal Sandbox (see
         # glc/sandbox/dispatch.py) instead of in-process, with network egress

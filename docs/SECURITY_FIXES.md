@@ -84,3 +84,43 @@ spoof and the connection stays open.
 `msg.channel` from adapter output; enforcing `msg.channel == name` there
 too is a reasonable follow-up hardening, but the named leak 9 is the WS
 control plane fixed here.
+
+---
+
+## A5 — Non-reproducible image (supply-chain drift)
+
+**Invariant restored:** supports the supply-chain posture behind all eight
+(a build you cannot reproduce is a build you cannot trust or audit).
+**Attacker role:** supply-chain — anyone who can influence what the base
+image or a dependency resolves to between builds.
+
+**The bug.** The image was built on the rolling `debian_slim` tag with
+`>=` dependency ranges (`fastapi>=0.110`, …), re-resolved on every build
+and ignoring `uv.lock`. Two identical `modal deploy` runs could ship
+different bytes — a new base layer or a newer transitive dependency —
+so a compromised upstream release lands silently, and nothing is
+auditable or reproducible.
+
+**The fix (build from pinned inputs).**
+
+1. `requirements.lock.txt` — the fully pinned, hash-verified export of
+   `uv.lock` (`uv export --frozen --no-dev --no-emit-project`): exact `==`
+   versions with `--hash=` for the whole transitive closure. `modal_app.py`
+   installs from it via `.pip_install_from_requirements(...)` instead of
+   `.pip_install("pkg>=x")`, so pip runs in hash-verified mode.
+2. `modal_app.py` — the base image is pinned to an immutable digest,
+   `python:3.11-slim-bookworm@sha256:b189929…`, via
+   `Image.from_registry(...)` instead of the rolling `debian_slim`.
+
+Because `build_image()` is reused for every A3 per-adapter Sandbox too,
+both the gateway Function and every Sandbox now build from identical,
+pinned inputs.
+
+**Verified.** `requirements.lock.txt` is fully pinned + hashed (1352
+lines, no unpinned specs); the base digest was resolved from the Docker
+Hub registry manifest; `uv run modal deploy` rebuilds the image from the
+lock + digest and the gateway boots (`/healthz` → `{"ok": true}`).
+
+**Maintenance.** After any dependency change, regenerate the lock export
+and (when bumping the base) refresh the digest — both commands are in the
+`modal_app.py` header comment.
