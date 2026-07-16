@@ -66,15 +66,37 @@ image = build_image()
 # survive restarts and redeploys. Without this, every restart wipes them.
 data_volume = modal.Volume.from_name("glc-data", create_if_missing=True)
 
-# The provider keys, injected as environment variables at runtime. Created
-# separately with `modal secret create glc-llm-keys ...` (mock values for now).
-llm_secret = modal.Secret.from_name("glc-llm-keys")
+# Finding A4 (leak 1): ONE Secret per provider, not one shared "glc-llm-keys"
+# holding all of them. Each is delivered to the gateway at startup, and then
+# glc.security.keyvault.seal() (called in glc.main's lifespan) snapshots every
+# key into a private in-process store and DELETES it from os.environ, so no
+# in-process code can read a provider key via os.getenv() / /proc/self/environ.
+# Splitting the Secret removes the single-Secret shape and lets each key be
+# scoped and rotated on its own (and is the groundwork for the per-call
+# Sandbox isolation, Moves 2-4 / option A — see docs/SECURITY_FIXES.md).
+#
+# Create them once (mock values only) with:
+#   uv run modal secret create glc-provider-gemini     GEMINI_API_KEY=mock-not-real
+#   uv run modal secret create glc-provider-nvidia     NVIDIA_API_KEY=mock-not-real
+#   uv run modal secret create glc-provider-groq       GROQ_API_KEY=mock-not-real
+#   uv run modal secret create glc-provider-cerebras   CEREBRAS_API_KEY=mock-not-real
+#   uv run modal secret create glc-provider-openrouter OPEN_ROUTER_API_KEY=mock-not-real
+#   uv run modal secret create glc-provider-github     GITHUB_ACCESS_TOKEN=mock-not-real
+PROVIDER_SECRET_NAMES = [
+    "glc-provider-gemini",
+    "glc-provider-nvidia",
+    "glc-provider-groq",
+    "glc-provider-cerebras",
+    "glc-provider-openrouter",
+    "glc-provider-github",
+]
+llm_secrets = [modal.Secret.from_name(n) for n in PROVIDER_SECRET_NAMES]
 
 
 @app.function(
     image=image,
     volumes={"/data": data_volume},
-    secrets=[llm_secret],
+    secrets=llm_secrets,
     min_containers=0,  # scale to zero when idle -> protects the free tier
 )
 @modal.asgi_app()

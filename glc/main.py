@@ -31,6 +31,7 @@ from glc.routes import control as control_route  # noqa: E402
 from glc.routes import speak as speak_route  # noqa: E402
 from glc.routes import transcribe as transcribe_route  # noqa: E402
 from glc.routing import Router, RouterPool  # noqa: E402
+from glc.security import keyvault  # noqa: E402
 
 PORT = int(os.getenv("GLC_PORT", "8111"))
 
@@ -62,6 +63,10 @@ async def lifespan(app: FastAPI):
     init_audit()
     get_or_create_install_token()
     _install_sighup_reload()
+    # Finding A4 (leak 1): pull every provider key out of os.environ into the
+    # private keyvault before anything builds providers, so no in-process code
+    # can read a provider credential via os.getenv() or /proc/self/environ.
+    keyvault.seal()
     app.state.cache = GeminiCache(ttl_seconds=300)
     app.state.providers = P.build_providers(app.state.cache)
     app.state.router = Router(app.state.providers, chat_route.ORDER)

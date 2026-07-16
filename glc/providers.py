@@ -31,6 +31,8 @@ from typing import Any
 
 import httpx
 
+from glc.security import keyvault  # A4: provider keys come from the vault, not os.environ
+
 # ────────────────────────────────────────────────────────────────────────────
 # V9 multimodal helpers
 # ────────────────────────────────────────────────────────────────────────────
@@ -1163,19 +1165,19 @@ def build_providers(cache_store):
     - groq worker default: openai/gpt-oss-120b (was llama-3.3-70b-versatile, now moved to router pool)
     """
     out = {}
-    if k := os.getenv("GEMINI_API_KEY"):
+    if k := keyvault.get("GEMINI_API_KEY"):
         out["gemini"] = GeminiProvider(k, os.getenv("GEMINI_MODEL", "gemini-2.5-flash"), cache_store)
-    if k := os.getenv("NVIDIA_API_KEY"):
+    if k := keyvault.get("NVIDIA_API_KEY"):
         out["nvidia"] = NvidiaProvider(k, os.getenv("NVIDIA_MODEL", "deepseek-ai/deepseek-v3.2"))
-    if k := os.getenv("GROQ_API_KEY"):
+    if k := keyvault.get("GROQ_API_KEY"):
         out["groq"] = GroqProvider(k, os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"))
-    if k := os.getenv("CEREBRAS_API_KEY"):
+    if k := keyvault.get("CEREBRAS_API_KEY"):
         out["cerebras"] = CerebrasProvider(k, os.getenv("CEREBRAS_MODEL", "zai-glm-4.7"))
-    if k := os.getenv("OPEN_ROUTER_API_KEY"):
+    if k := keyvault.get("OPEN_ROUTER_API_KEY"):
         out["openrouter"] = OpenRouterProvider(
             k, os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
         )
-    if k := os.getenv("GITHUB_ACCESS_TOKEN"):
+    if k := keyvault.get("GITHUB_ACCESS_TOKEN"):
         out["github"] = GitHubProvider(k, os.getenv("GITHUB_MODEL", "openai/gpt-4.1-mini"))
     if om := os.getenv("OLLAMA_MODEL"):
         out["ollama"] = OllamaProvider(om, os.getenv("OLLAMA_URL", "http://localhost:11434"))
@@ -1211,12 +1213,12 @@ def build_router_providers():
     we picked (Cerebras, Groq, NVIDIA, GitHub) all meter per-model, not per-key.
     """
     out = {}
-    if k := os.getenv("CEREBRAS_API_KEY"):
+    if k := keyvault.get("CEREBRAS_API_KEY"):
         out["cerebras"] = CerebrasProvider(k, os.getenv("ROUTER_CEREBRAS_MODEL", ROUTER_DEFAULTS["cerebras"]))
-    if k := os.getenv("GROQ_API_KEY"):
+    if k := keyvault.get("GROQ_API_KEY"):
         out["groq"] = GroqProvider(k, os.getenv("ROUTER_GROQ_MODEL", ROUTER_DEFAULTS["groq"]))
-    if k := os.getenv("NVIDIA_API_KEY"):
+    if k := keyvault.get("NVIDIA_API_KEY"):
         out["nvidia"] = NvidiaProvider(k, os.getenv("ROUTER_NVIDIA_MODEL", ROUTER_DEFAULTS["nvidia"]))
-    if k := os.getenv("GITHUB_ACCESS_TOKEN"):
+    if k := keyvault.get("GITHUB_ACCESS_TOKEN"):
         out["github"] = GitHubProvider(k, os.getenv("ROUTER_GITHUB_MODEL", ROUTER_DEFAULTS["github"]))
     return out

@@ -35,6 +35,13 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.audit.store as _a
 
     _a._singleton = None
+
+    # A4: the provider-key vault snapshots + scrubs os.environ on seal(); reset
+    # it per-test so a key sealed by one test never leaks into the next.
+    import glc.security.keyvault as _kv
+
+    _kv._store.clear()
+    _kv._sealed = False
     yield
 
 

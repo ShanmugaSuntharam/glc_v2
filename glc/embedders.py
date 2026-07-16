@@ -28,6 +28,8 @@ from typing import Literal
 
 import httpx
 
+from glc.security import keyvault  # A4: Gemini key comes from the vault, not os.environ
+
 TaskType = Literal["retrieval_document", "retrieval_query"]
 EMBED_DIM = 768  # both providers are pinned to this
 
@@ -204,7 +206,7 @@ def build_embedders() -> tuple[list[EmbeddingProvider], list[str]]:
         "ollama": OllamaEmbedder(ollama_model, ollama_url),
     }
     if fallback_provider == "gemini":
-        key = os.getenv("GEMINI_API_KEY")
+        key = keyvault.get("GEMINI_API_KEY")
         if key:
             registry["gemini"] = GeminiEmbedder(key, fallback_model)
 
