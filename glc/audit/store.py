@@ -6,7 +6,10 @@ lands here. Append-only is enforced at the application layer: only
 ships with `audit_schema` version 1; bumping it requires a documented
 migration step (see schema.sql).
 
-Each append commits immediately so writes survive a hard kill.
+Each append commits immediately (SQLite autocommit) so writes survive a
+hard kill. Finding A6: under Modal the db lives on a Volume whose writes
+only become durable on volume.commit(); modal_app.py registers that commit
+via set_commit_hook() so each append is flushed all the way to the Volume.
 """
 
 from __future__ import annotations
@@ -15,11 +18,37 @@ import json
 import os
 import sqlite3
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 DEFAULT_DIR = Path(os.path.expanduser("~/.glc"))
+
+# Finding A6: the audit db lives on a Modal Volume, and a write to a Volume
+# mount is not durable until the Volume is committed. modal_app.py registers
+# data_volume.commit here so every append persists past container shutdown /
+# scale-to-zero. Unset locally and in tests (SQLite autocommit alone is
+# durable on a normal filesystem), so this stays a no-op off Modal.
+_commit_hook: Callable[[], None] | None = None
+
+
+def set_commit_hook(fn: Callable[[], None] | None) -> None:
+    global _commit_hook
+    _commit_hook = fn
+
+
+def _run_commit_hook() -> None:
+    if _commit_hook is None:
+        return
+    try:
+        _commit_hook()
+    except Exception:
+        # A volume-commit hiccup must never fail the request path or, worse,
+        # become a way to block auditing. SQLite has already flushed the row
+        # to the container's view of the Volume; Modal's background commit is
+        # the backstop. Swallow and move on.
+        pass
 
 
 def _resolve_path() -> str:
@@ -96,7 +125,10 @@ class AuditStore:
                     _jsonify(result),
                 ),
             )
-            return int(cur.lastrowid or 0)
+            rowid = int(cur.lastrowid or 0)
+        # A6: flush the row all the way to the Modal Volume (no-op off Modal).
+        _run_commit_hook()
+        return rowid
 
 
 _singleton: AuditStore | None = None

@@ -124,3 +124,51 @@ lock + digest and the gateway boots (`/healthz` → `{"ok": true}`).
 **Maintenance.** After any dependency change, regenerate the lock export
 and (when bumping the base) refresh the digest — both commands are in the
 `modal_app.py` header comment.
+
+---
+
+## A6 — Audit db on a Volume with autoscale (concurrent writers + durability)
+
+**Invariant restored:** 7 — *components must not be able to corrupt the
+audit log* (here: the deployment must not corrupt it either).
+**Attacker role:** availability / integrity — triggered by load, not a
+specific actor: enough traffic makes autoscale spin up a second writer.
+
+**The bug.** The audit / pairing / cost databases are SQLite files on the
+shared Modal Volume. SQLite is single-writer and a Volume is not a
+concurrent-write filesystem, yet the gateway ran with `min_containers=0`
+and no upper bound — so under load Modal could run two containers, both
+writing `audit.sqlite`, corrupting or splitting the trail. Separately, a
+write to a Volume mount is not durable until the Volume is committed, and
+the app never committed — so on scale-to-zero the newest audit rows could
+vanish.
+
+**The fix (single writer + explicit durability).**
+
+1. `modal_app.py` — `max_containers=1` on the gateway Function. With
+   `min=0 / max=1` there are only ever 0 or 1 writers, never two, so the
+   concurrent-writer corruption cannot happen (this also protects the
+   pairing and cost SQLite files on the same Volume).
+2. `glc/audit/store.py` — a `set_commit_hook()` seam; `AuditStore.append()`
+   flushes via the hook after every insert. `modal_app.py` registers
+   `data_volume.commit`, so each audit row is persisted all the way to the
+   Volume and survives shutdown / scale-to-zero. The hook is best-effort
+   (a commit hiccup never fails the request or blocks auditing) and unset
+   off Modal, where SQLite autocommit is already durable. `reload()` is
+   unnecessary under `max_containers=1` — no other writer can advance the
+   Volume behind the single container.
+
+The store remains append-only at the app layer (no update/delete/clear
+methods) — invariant 7.
+
+**Verified.** `tests/test_a6_audit_durability.py`: append invokes the
+commit hook exactly once; append still works with no hook; a failing hook
+never breaks append and the row still lands; the store exposes no
+delete/update/clear. Full suite 285 passed. Live: `uv run modal deploy`
+with `max_containers=1` boots (`/healthz` → `{"ok": true}`).
+
+**Scope / related.** The OS-layer writability of the SQLite files from
+in-process code (leak 2 / B2: `DELETE FROM audit_log`) is a separate
+finding — closed by component separation + a hash-chained append-only log,
+tracked elsewhere. A6 is the deployment-level concurrency + durability of
+the audit db, fixed here.

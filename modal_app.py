@@ -63,6 +63,13 @@ def build_image() -> modal.Image:
         # restricted per glc/channels.yaml. Off by default (unset -> in-process,
         # what local dev and the test suite use) so this is opt-in per-deployment.
         .env({"GLC_CONFIG_DIR": "/data/glc", "GLC_ADAPTER_SANDBOX": "1"})
+        # Bake the lockfile into the image at the SAME path build_image()
+        # resolves (Path(__file__).parent is /root inside the container). A3
+        # calls build_image() again from *inside* the running gateway to make
+        # each per-adapter Sandbox, and pip_install_from_requirements must be
+        # able to read the lockfile there too -- otherwise the runtime Sandbox
+        # build fails with FileNotFoundError. Mirrors how glc/ is carried in.
+        .add_local_file(str(REQUIREMENTS_LOCK), remote_path="/root/requirements.lock.txt")
         .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc")
     )
 
@@ -105,6 +112,14 @@ llm_secrets = [modal.Secret.from_name(n) for n in PROVIDER_SECRET_NAMES]
     volumes={"/data": data_volume},
     secrets=llm_secrets,
     min_containers=0,  # scale to zero when idle -> protects the free tier
+    # Finding A6: the audit / pairing / cost databases are SQLite files on the
+    # shared Volume. SQLite is a single-writer store and a Modal Volume is not
+    # a concurrent-write filesystem, so if autoscale ran two containers they
+    # would corrupt or split the audit trail (invariant 7). Cap the gateway at
+    # one container: with min=0/max=1 there are only ever 0 or 1 writers, never
+    # two. (Correctness of the audit log over horizontal scale is the right
+    # trade for a gateway; a real multi-writer DB is the alternative.)
+    max_containers=1,
 )
 @modal.asgi_app()
 def fastapi_app():
@@ -114,6 +129,15 @@ def fastapi_app():
     # The gateway writes its databases and install token here on startup, so the
     # folder must exist on the mounted Volume before the app's lifespan runs.
     os.makedirs("/data/glc", exist_ok=True)
+
+    # Finding A6: a write to a Modal Volume mount is not durable until the
+    # Volume is committed. Register data_volume.commit as the audit store's
+    # per-append flush so the trail survives container shutdown / scale-to-zero.
+    # (reload() is unnecessary here: max_containers=1 means no other writer can
+    # advance the Volume behind this container's back.)
+    from glc.audit import store as audit_store
+
+    audit_store.set_commit_hook(data_volume.commit)
 
     # Finding A3: let glc.sandbox.dispatch spin up per-adapter Sandboxes
     # against this same App, rebuilding the Image fresh each time (see
