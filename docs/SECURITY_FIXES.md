@@ -618,3 +618,73 @@ the gateway is a containment problem, not a coding one — Modal restarts the
 container, so the blast radius is a brief outage rather than a dead install.
 For the attacker the finding actually names — an adapter — A3's PID namespace
 is the fix, and it is already in place.
+
+---
+
+## C1 — SSRF via `/v1/vision`
+
+**Invariant restored:** 2 — *every action checked against the actual user*.
+This is the **confused deputy**: the gateway applied its own identity and
+network position to a request the caller chose.
+**Attacker role:** 2 — a normal channel user who controls only the text they
+type (plus the install token A1 now requires). **Severity: high.**
+
+**The bug.** `_resolve_image_urls` fetched **any** `http(s)` URL the caller
+supplied, with `follow_redirects=True`, no allowlist, and no size cap. The
+request leaves with the gateway's credentials and from inside the gateway's
+network, so the caller reaches addresses they never could themselves — a cloud
+metadata service above all, which hands credentials to anything inside the
+network. The bytes then come back **base64'd into the model's context**, and
+per the notes' Section-12 chain, out again through the reply — an allowed
+channel no egress rule blocks.
+
+**The fix.** `glc/security/ssrf.py`, applied in `_resolve_image_urls`:
+
+* **Check the address, not the string.** `http://2852039166/`,
+  `http://0x7f000001/` and `http://[::ffff:169.254.169.254]/` are all ways of
+  spelling an internal address, and a hostname can simply resolve to one. The
+  host is resolved with `getaddrinfo()` and **every** returned IP is checked —
+  which defeats every encoding at once, because they all resolve to the same
+  number.
+* **Block loopback / private / link-local / reserved / multicast / unspecified
+  for IPv4 *and* IPv6**, unwrapping IPv4-mapped IPv6 so
+  `::ffff:169.254.169.254` cannot smuggle a v4 address past a v6 check.
+* **Re-check every redirect hop.** `follow_redirects=False`; redirects are
+  followed manually and re-validated. A public URL that 302s to
+  `169.254.169.254` was the whole point of the automatic redirect following.
+* **Refuse non-http(s) schemes and URLs carrying credentials**, bound the
+  response (16 MiB) and the chain (5 hops), and **audit** every block as
+  `ssrf_blocked` — a blocked fetch is someone trying to use the gateway as a
+  proxy into its own network.
+* An optional `GLC_IMAGE_URL_ALLOWLIST` narrows the reachable hosts further;
+  it can only ever narrow, never widen — an allowlisted internal address is
+  still refused.
+
+**Verified.** `tests/test_c1_ssrf.py` (28 tests, network-free — literal IPs
+resolve locally, redirect chains use `httpx.MockTransport`): metadata,
+loopback, all three RFC1918 ranges, IPv6 loopback/link-local/ULA, the
+IPv4-mapped form and the decimal encoding are each refused; non-http schemes
+and credential URLs refused; a **redirect from a public URL to metadata** and
+to loopback are refused and redirect chains bounded; oversized bodies and a
+**lying `content-length`** are both capped; the honest path still fetches; and
+end-to-end `POST /v1/vision` at the metadata service returns 400 and is
+audited.
+
+**⚠ Bug found while testing this: `/v1/vision` was dead.** A1 added
+`require_install_token(authorization)` to `chat()`, but `vision()` calls
+`await chat(inner, request)` **without forwarding `authorization`** — so
+`chat()` received FastAPI's `Header(default=None)` *sentinel object* instead
+of a string and raised `AttributeError` on `.startswith`. **Every** `/v1/vision`
+request had 500'd since A1. It failed *closed*, so it was never an auth
+bypass, but the endpoint was unusable — and C1's SSRF was consequently
+unreachable to test. Fixed by forwarding the header (`glc/routes/chat.py`),
+which is why the end-to-end tests above can exist at all.
+
+**Honest scope.** This is DNS-rebinding-**resistant**, not
+rebinding-**proof**: the name is resolved and checked, then httpx resolves it
+again to connect, so a record that flips between the two could in principle
+slip through (a TOCTOU). Closing that needs the connection pinned to the
+validated IP. What is implemented is exactly the notes' prescribed fix —
+"resolve the host, block loopback, private, and link-local addresses for IPv4
+and IPv6, and re-check after every redirect" — plus the allowlist, bounds and
+auditing.

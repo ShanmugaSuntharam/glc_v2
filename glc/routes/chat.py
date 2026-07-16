@@ -291,20 +291,39 @@ async def _resolve_image_urls(messages):
 
     import httpx as _httpx
 
+    from glc.audit import append as audit_append
+    from glc.security import ssrf
+
     async def _fetch_to_data_url(url: str) -> str:
+        """Finding C1: this used to fetch ANY http(s) URL with
+        follow_redirects=True and no allowlist, so a caller could point the
+        gateway at internal addresses -- cloud metadata above all -- and have
+        the bytes handed back base64'd into the model's context. The fetch now
+        goes through glc.security.ssrf, which resolves the host and refuses
+        internal addresses (v4 and v6) on every redirect hop, and bounds the
+        response. See glc/security/ssrf.py."""
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
             "Accept": "image/*,*/*;q=0.8",
         }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
-            try:
-                r = await c.get(url)
-                r.raise_for_status()
-            except _httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
-            mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            b64 = base64.b64encode(r.content).decode()
-            return f"data:{mt};base64,{b64}"
+        try:
+            content, mt = await ssrf.fetch(url, headers=headers)
+        except ssrf.SSRFBlocked as e:
+            # A blocked fetch is an attempt to use the gateway as a proxy into
+            # its own network: record it, then refuse.
+            audit_append(
+                channel="_system",
+                channel_user_id="_gateway",
+                trust_level="untrusted",
+                event_type="ssrf_blocked",
+                params={"url": url[:200]},
+                result={"reason": str(e)[:300]},
+            )
+            raise HTTPException(400, f"refusing to fetch image url: {e}") from None
+        except _httpx.HTTPError as e:
+            raise HTTPException(400, f"failed to fetch image url {url!r}: {e}") from None
+        b64 = base64.b64encode(content).decode()
+        return f"data:{mt};base64,{b64}"
 
     out = []
     for m in messages:
@@ -679,7 +698,12 @@ async def vision(req: VisionRequest, request: Request, authorization: str | None
         agent=req.agent,
         session=req.session,
     )
-    return await chat(inner, request)
+    # A1 fix-up: chat() gained require_install_token(authorization), but this
+    # inner call never forwarded it, so chat() received FastAPI's
+    # Header(default=None) SENTINEL OBJECT rather than a string and blew up on
+    # .startswith -> every /v1/vision request 500'd. It failed closed (no auth
+    # bypass), but the endpoint has been dead since A1. Forward the header.
+    return await chat(inner, request, authorization)
 
 
 @router.post("/v1/embed")
