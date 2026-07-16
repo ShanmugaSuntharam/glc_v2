@@ -180,3 +180,56 @@ in-process code (leak 2 / B2: `DELETE FROM audit_log`) is a separate
 finding — closed by component separation + a hash-chained append-only log,
 tracked elsewhere. A6 is the deployment-level concurrency + durability of
 the audit db, fixed here.
+
+---
+
+## B7 — Cost-ledger poisoning (leak 10)
+
+**Invariant restored:** 8 — *every run must have hard limits on time,
+tokens, tool calls, and cost*. A budget is only as trustworthy as the
+ledger it is measured from; a ledger anyone can forge enforces nothing.
+**Attacker role:** 3–4 — any code sharing the gateway process.
+
+**The bug.** `glc.db.log_call()` wrote whatever the caller handed it and
+validated nothing, so in-process code could forge rows in the ledger that
+`/v1/cost/by_agent`, `recent()` and `aggregate()` report from:
+
+```python
+glc.db.log_call(provider="gemini", model="x",
+                input_tokens=999_999_999, agent="victim", status="ok")
+```
+
+Three concrete harms:
+* **absurd counters** inflate a victim's apparent spend (the notes' exploit);
+* **negative counters** are worse — they *shrink* the `SUM()` in
+  `by_agent()`/`aggregate()`, so an attacker can **mask** real spend rather
+  than merely fake it;
+* **non-integer values** slide straight into an `INTEGER` column (SQLite is
+  dynamically typed), corrupting every later `SUM`/`AVG` over it.
+
+**The fix.** `glc/db.py` validates every field at the single write
+chokepoint before it reaches the ledger:
+* each counter must be a **non-negative whole number within a ceiling** set
+  far above any real call (`MAX_TOKENS` 10M vs. ~2M largest real context;
+  `MAX_LATENCY_MS` 24h);
+* text fields are **length-bounded** (`MAX_TEXT_LEN`) so a caller cannot
+  fill the ledger/Volume with giant blobs;
+* `provider` / `model` are required and non-empty.
+
+A bad row is **refused** (`LedgerValueError`), not clamped — clamping would
+still record the attacker's fiction, just a smaller one. `None` counters
+still coerce to `0` because the real callers pass
+`result.get("input_tokens", 0)`, which can be `None`.
+
+**Verified.** `tests/test_b7_ledger_validation.py` (10 tests): the absurd,
+negative, non-integer and bool counters are all refused and nothing is
+written; realistic rows still land; `None`→0 and nullable `embed_dim`
+preserved; oversized text bounded; and a refused poisoning attempt leaves
+`by_agent()` totals intact. Full suite 295 passed — all 11 legitimate
+`log_call` sites in `glc/routes/chat.py` unaffected.
+
+**Honest scope.** This does **not** stop a caller writing *plausible* fake
+rows, or attributing a genuine call to another agent — those numbers pass
+every check here. Closing that needs a signed writer the gateway alone
+holds, plus process separation (capstone scope, same root cause as B5/B6:
+one process, no walls).

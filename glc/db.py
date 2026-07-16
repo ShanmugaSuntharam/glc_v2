@@ -14,9 +14,83 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 DEFAULT_DIR = Path(os.path.expanduser("~/.glc"))
 DB_PATH = os.getenv("GLC_GATEWAY_DB", str(DEFAULT_DIR / "gateway.sqlite"))
+
+# ────────────────────────────────────────────────────────────────────────────
+# Finding B7 — cost-ledger poisoning
+# ────────────────────────────────────────────────────────────────────────────
+# log_call() used to write whatever the caller handed it, validating nothing,
+# so any code sharing the gateway process could poison the ledger that
+# /v1/cost/by_agent, recent() and aggregate() report from:
+#
+#     glc.db.log_call(provider="gemini", model="x",
+#                     input_tokens=999_999_999, agent="victim", status="ok")
+#
+# Three concrete harms, all closed below by validating at this one chokepoint:
+#   * absurd counters inflate spend/usage (the notes' exploit above);
+#   * NEGATIVE counters are worse -- they shrink the SUM() in by_agent() and
+#     aggregate(), so an attacker can mask real spend rather than just fake it;
+#   * a non-int slides straight into an INTEGER column, because SQLite is
+#     dynamically typed, corrupting every later SUM/AVG over that column.
+# Text fields are length-bounded so a caller cannot fill the ledger with giant
+# blobs (a cheap denial-of-service / disk-fill on the same Volume).
+#
+# Honest scope: this does NOT stop a caller writing *plausible* fake rows, or
+# attributing a real call to another agent -- the numbers would pass every
+# check here. That needs a signed writer the gateway alone holds, plus process
+# separation, and stays capstone scope (see docs/SECURITY_FIXES.md).
+
+# Ceilings sit far above any real call, so a legitimate row can never trip
+# them: the largest production context windows are ~2M tokens, and a call
+# cannot plausibly run for a day.
+MAX_TOKENS = 10_000_000
+MAX_CHARS = 100_000_000
+MAX_LATENCY_MS = 86_400_000  # 24h
+MAX_TOOL_CALLS = 10_000
+MAX_RETRIES = 1_000
+MAX_EMBED_DIM = 100_000
+MAX_TEXT_LEN = 4096
+
+
+class LedgerValueError(ValueError):
+    """A ledger field failed validation — the row is refused, not written."""
+
+
+def _counter(name: str, value: Any, ceiling: int, *, nullable: bool = False) -> int | None:
+    """Validate one numeric ledger column: a non-negative whole number within
+    `ceiling`. None means 'not supplied' -> 0 (or NULL for nullable columns)."""
+    if value is None:
+        return None if nullable else 0
+    # bool is an int subclass; a True/False counter is always a caller bug.
+    if isinstance(value, bool):
+        raise LedgerValueError(f"{name} must be an integer, got bool")
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise LedgerValueError(f"{name} must be a whole number, got {value!r}")
+        value = int(value)
+    if not isinstance(value, int):
+        raise LedgerValueError(f"{name} must be an integer, got {type(value).__name__}")
+    if value < 0:
+        raise LedgerValueError(f"{name} must be >= 0, got {value}")
+    if value > ceiling:
+        raise LedgerValueError(f"{name}={value} exceeds the plausible ceiling {ceiling}")
+    return value
+
+
+def _text(name: str, value: Any, *, required: bool = False) -> str | None:
+    """Validate one text ledger column: a string, length-bounded."""
+    if value is None:
+        if required:
+            raise LedgerValueError(f"{name} is required")
+        return None
+    if not isinstance(value, str):
+        raise LedgerValueError(f"{name} must be a string, got {type(value).__name__}")
+    if required and not value.strip():
+        raise LedgerValueError(f"{name} must not be empty")
+    return value[:MAX_TEXT_LEN]
 
 
 def _ensure_parent() -> None:
@@ -96,6 +170,31 @@ def log_call(
     session=None,
     retries=0,
 ) -> None:
+    # B7: validate every field before it reaches the ledger. A poisoned row is
+    # refused outright rather than clamped -- clamping would still record the
+    # attacker's fiction, just a smaller one.
+    provider = _text("provider", provider, required=True)
+    model = _text("model", model, required=True)
+    input_tokens = _counter("input_tokens", input_tokens, MAX_TOKENS)
+    output_tokens = _counter("output_tokens", output_tokens, MAX_TOKENS)
+    cache_create_tokens = _counter("cache_create_tokens", cache_create_tokens, MAX_TOKENS)
+    cache_read_tokens = _counter("cache_read_tokens", cache_read_tokens, MAX_TOKENS)
+    latency_ms = _counter("latency_ms", latency_ms, MAX_LATENCY_MS)
+    prompt_chars = _counter("prompt_chars", prompt_chars, MAX_CHARS)
+    response_chars = _counter("response_chars", response_chars, MAX_CHARS)
+    tool_calls = _counter("tool_calls", tool_calls, MAX_TOOL_CALLS)
+    retries = _counter("retries", retries, MAX_RETRIES)
+    embed_dim = _counter("embed_dim", embed_dim, MAX_EMBED_DIM, nullable=True)
+    status = _text("status", status)
+    error = _text("error", error)
+    override = _text("override", override)
+    attempted = _text("attempted", attempted)
+    tool_dialect = _text("tool_dialect", tool_dialect)
+    call_role = _text("call_role", call_role)
+    router_decision = _text("router_decision", router_decision)
+    agent = _text("agent", agent)
+    session = _text("session", session)
+
     with conn() as c:
         c.execute(
             """INSERT INTO calls (ts, provider, model, input_tokens, output_tokens,
