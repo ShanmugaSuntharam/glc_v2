@@ -67,6 +67,30 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
 
+            # Finding C2 / leak 9 (cross-channel envelope spoofing): an
+            # adapter must not speak for a channel other than the one its
+            # socket is bound to. glc_v1 processed env.channel without ever
+            # checking it against the route {name}, so a Telegram adapter
+            # could send env.channel="discord" and borrow Discord's
+            # allowlist / owner pairing. Reject the mismatch, record the
+            # attempt, and close the socket. Restores invariant 2 (every
+            # action checked against the actual channel).
+            if env.channel != name:
+                audit_append(
+                    channel=name,
+                    channel_user_id=env.channel_user_id,
+                    trust_level=env.trust_level,
+                    event_type="channel_spoof_rejected",
+                    result={"route": name, "declared_channel": env.channel},
+                )
+                await websocket.send_text(
+                    json.dumps(
+                        {"error": f"channel mismatch: envelope declares '{env.channel}' on route '{name}'"}
+                    )
+                )
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+
             ok, why = allowed(
                 env.channel,
                 env.channel_user_id,

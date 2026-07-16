@@ -54,3 +54,33 @@ shape. It does not, by itself, stop *trusted* in-gateway code from calling
 provider call in its own short-lived Modal Sandbox that receives only that
 one provider's Secret with an egress allowlist — capstone scope, mirroring
 what A3 already did for channel adapters.
+
+---
+
+## C2 — Cross-channel envelope spoofing (leak 9)
+
+**Invariant restored:** 2 — *every action must be checked against the
+actual user, tenant, and final arguments* (here: the actual channel).
+**Attacker role:** 3 — a compromised adapter holding the install token.
+
+**The bug.** `WS /v1/channels/{name}` validated the incoming
+`ChannelMessage` but never checked that `env.channel` matched the route
+`{name}`. A Telegram adapter could connect to `/v1/channels/telegram` and
+send an envelope with `env.channel="discord"`; every downstream check
+(allowlist, owner pairing, audit) then ran against **discord**, so the
+Telegram adapter borrowed Discord's trust.
+
+**The fix.** `glc/routes/channels.py` — immediately after envelope
+validation, reject any message whose `env.channel != name`: record a
+`channel_spoof_rejected` audit event, send a `channel mismatch` error, and
+close the socket (`WS_1008_POLICY_VIOLATION`). One deterministic
+application-layer check, exactly as the notes prescribe.
+
+**Verified.** `tests/test_c2_channel_spoof.py`: a mismatched envelope is
+rejected and the socket closed; a matching envelope is not treated as a
+spoof and the connection stays open.
+
+**Also reviewed.** The `POST /v1/channels/{name}/webhook` path derives
+`msg.channel` from adapter output; enforcing `msg.channel == name` there
+too is a reasonable follow-up hardening, but the named leak 9 is the WS
+control plane fixed here.
