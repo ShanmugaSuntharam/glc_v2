@@ -46,9 +46,20 @@ PER_CALLER_RPM_ENV = "GLC_DATA_PLANE_RPM"
 GLOBAL_RPM_ENV = "GLC_DATA_PLANE_GLOBAL_RPM"
 DAILY_BUDGET_ENV = "GLC_DAILY_BUDGET_USD"
 
+# Finding C6: pairing codes are six digits -- a space of 1,000,000 -- entered
+# by a human, so they cannot be made longer without ruining the flow. That is
+# fine, and it is how every 2FA code works: a short code is safe ONLY because
+# guesses are capped. Without a cap the five-minute TTL is not protection, it
+# is just a deadline an attacker can beat. This limit is therefore the entire
+# security of the code, and it is deliberately much tighter than the data
+# plane's.
+DEFAULT_PAIR_CONFIRM_RPM = 5
+PAIR_CONFIRM_RPM_ENV = "GLC_PAIR_CONFIRM_RPM"
+
 _lock = threading.Lock()
 _per_caller: dict[str, deque[float]] = {}
 _global: deque[float] = deque()
+_pair_confirm: dict[str, deque[float]] = {}
 
 
 class QuotaExceeded(Exception):
@@ -79,6 +90,29 @@ def reset() -> None:
     with _lock:
         _per_caller.clear()
         _global.clear()
+        _pair_confirm.clear()
+
+
+def check_pair_confirm(caller: str) -> tuple[bool, str]:
+    """Finding C6: cap pairing-code guesses.
+
+    Six digits is 1,000,000 possibilities. Unthrottled, that is minutes of
+    guessing -- well inside the code's five-minute life. Capped at a handful
+    per minute, a caller gets a few dozen tries before the code expires, which
+    is a ~1-in-20,000 chance. The cap, not the length, is what makes the code
+    safe.
+    """
+    cap = _int_env(PAIR_CONFIRM_RPM_ENV, DEFAULT_PAIR_CONFIRM_RPM)
+    if cap <= 0:
+        return True, ""  # explicitly disabled
+    now = time.time()
+    with _lock:
+        dq = _pair_confirm.setdefault(caller, deque())
+        _gc(dq, now - 60)
+        if len(dq) >= cap:
+            return False, f"too many pairing-code attempts (limit {cap}/min)"
+        dq.append(now)
+        return True, ""
 
 
 def spend_today_usd() -> float:

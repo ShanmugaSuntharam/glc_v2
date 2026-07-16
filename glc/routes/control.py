@@ -15,6 +15,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from glc.audit import append as audit_append
+from glc.security import quota
 from glc.security.auth import require_install_token as _require_token
 from glc.security.pairing import CODE_TTL_SECONDS, get_pairing_store
 
@@ -53,10 +54,36 @@ async def pair(req: PairRequest, authorization: str | None = Header(default=None
 
 
 @router.post("/v1/control/pair/confirm")
-async def pair_confirm(req: PairConfirmRequest, authorization: str | None = Header(default=None)):
+async def pair_confirm(
+    req: PairConfirmRequest, request: Request, authorization: str | None = Header(default=None)
+):
     _require_token(authorization)
+    # Finding C6: a six-digit code is 1,000,000 possibilities and lives for
+    # five minutes. Unthrottled, that is a race an attacker wins; the guess cap
+    # is the code's actual security, exactly as it is for any 2FA code.
+    caller = request.client.host if request.client else "unknown"
+    ok, why = quota.check_pair_confirm(caller)
+    if not ok:
+        audit_append(
+            channel="_system",
+            channel_user_id=caller,
+            trust_level="untrusted",
+            event_type="pair_confirm_rate_limited",
+            result={"reason": why},
+        )
+        raise HTTPException(429, why)
+
     rec = get_pairing_store().confirm_code(req.code)
     if rec is None:
+        # A wrong code is the shape of a brute force. One is a typo; a stream
+        # of them is an attack, and the audit log is where that becomes visible.
+        audit_append(
+            channel="_system",
+            channel_user_id=caller,
+            trust_level="untrusted",
+            event_type="pair_confirm_failed",
+            result={"reason": "code unknown or expired"},
+        )
         raise HTTPException(404, "code unknown or expired")
     return {
         "channel": rec.channel,

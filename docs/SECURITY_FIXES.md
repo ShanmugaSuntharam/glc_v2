@@ -838,3 +838,58 @@ is approximate; it is a safety net against a runaway loop or a hostile caller,
 not an accounting control. The per-IP key trusts `request.client.host`, which
 behind a proxy may be the proxy — the global cap is the backstop for exactly
 that case.
+
+---
+
+## C6 — Pairing-code brute force (listed as a *candidate*)
+
+**Invariant restored:** 2 — trust must be granted to the *actual* user.
+**Attacker role:** would be 1 (an outsider) — **if it were reachable. It is
+not.** See below.
+
+**The notes' open question, answered.** C6 is filed as a candidate with an
+explicit task: *"Worth confirming whether any user-initiated pairing path is
+reachable without the install token."*
+
+**No.** `/v1/control/pair` and `/v1/control/pair/confirm` both call
+`_require_token`, and the only other `issue_code` / `confirm_code` callers are
+setup scripts (`teams/setup/trust_setup.py`, `twilio_voice/test.py`) that run
+in their own process and are not HTTP-reachable. No channel or WS path
+initiates pairing — the S11 agent runtime is a stub. So **the brute force does
+not reproduce as an unauthenticated attack**, and a caller who already holds
+the install token has no need to guess: they can issue a code outright. Two
+tests pin that answer so it cannot rot.
+
+**The weakness is real, but latent.** Six digits is a space of **1,000,000**,
+the code lives **five minutes**, and — before this fix — guesses were
+**unlimited**. Unthrottled, a million guesses is minutes of work: the TTL was
+never protection, just a deadline an attacker beats. The code's safety rested
+*entirely* on a rate limit that did not exist. The moment a user-initiated
+pairing path appears (the agent runtime in a later session, a WebUI flow), it
+goes live with no warning.
+
+**The fix.** `quota.check_pair_confirm()` caps guesses at **5/min per caller**
+(`GLC_PAIR_CONFIRM_RPM`) — deliberately far tighter than the data plane's 60,
+because 60/min would still allow ~300 tries inside a code's life. At 5/min a
+caller gets a few dozen tries before expiry: roughly **1 in 20,000**. The cap,
+not the length, is what makes a short human-entered code safe — which is
+exactly how every 2FA code works. Lengthening the code was rejected: it is
+typed by a human, and six digits is the standard for good reason.
+
+`glc/routes/control.py` also audits both the throttle
+(`pair_confirm_rate_limited`) and **every wrong code**
+(`pair_confirm_failed`). One wrong code is a typo; a stream of them is a brute
+force, and the audit log is where that difference becomes visible.
+
+**Verified.** `tests/test_c6_pairing_brute_force.py` (9 tests): neither
+pairing endpoint is reachable without the token (the answer to the notes'
+question, pinned); guesses are capped and the cap is asserted tighter than the
+data plane's; throttling and wrong codes are audited; `0` disables the check;
+and — importantly — the honest path still works: a real issue→confirm round
+trip succeeds, and a correct code still works after several wrong ones. Full
+suite 430 passed.
+
+**Verdict.** Reported honestly, this is **not a live vulnerability** in
+glc_v2 — it is a latent one that the missing rate limit would have made
+critical the day a user-initiated pairing path shipped. The limit is now in
+place ahead of that.
