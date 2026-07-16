@@ -426,3 +426,67 @@ mode. Full suite 330 passed.
 so code that goes looking can read it and forge a signature. What is closed
 is both named exploits; what remains needs the pairing store in its own
 process — exactly the component separation the notes prescribe for leak 3.
+
+---
+
+## B8 — Unrestricted subprocess / shell access (leak 7)
+
+**Invariant restored:** 8 (every run bounded in time) and least-privilege for
+the gateway's own shell-outs.
+**Attacker role:** 3–4 — any code sharing the gateway process.
+
+**The bug.** The gateway shells out (the `whisper_cpp` STT slot, the system
+TTS fallback), and the shipped calls had four concrete problems — none of
+which is "there is a shell", which is why *removing* the shell was never the
+answer:
+
+* **PATH hijacking.** `shutil.which("whisper-cli")` and a bare `["say", …]`
+  both resolve through `PATH`. In-process code can prepend a directory it
+  controls and drop its own binary there, so an innocent transcription
+  request executes the attacker's program. `which()` is a code-execution
+  primitive.
+* **No timeout.** A wedged or hostile binary blocks forever — a free denial
+  of service (invariant 8).
+* **Full environment inheritance.** The child received the gateway's entire
+  `os.environ`.
+* **Argument injection.** `say -o out <text>` passed **user text** as a bare
+  argv element; `argv` is flat, so text beginning with `-` is parsed by `say`
+  as an option, not speech.
+
+**The fix.** `glc/security/exec_guard.py` is the single sanctioned way to
+spawn a process. It refuses `shell=True` outright; requires `argv[0]` to be an
+**absolute path inside a trusted binary directory** (`resolve_binary()` still
+finds via `PATH` but then *checks where it landed*, so a planted copy is
+rejected — the PATH-hijack defence); makes a **timeout mandatory**; hands the
+child `minimal_env()` (a `PATH` rebuilt from the trusted dirs plus a short
+allowlist — never the gateway's environment); and **audits every exec** into
+B2's tamper-evident log, so a shell-out is never invisible. The allowlist is a
+module constant, not an env var — an env knob would just hand an in-process
+attacker the allowlist.
+
+Call sites: `whisper_cpp/wrapper.py` resolves through the guard and is bounded
+(`GLC_WHISPER_TIMEOUT_S`, default 300s). `system_fallback/adapter.py` now
+passes the text **in a file** (`say -f`) instead of argv — user data never
+reaches a command line at all, which beats trying to sanitise it. The telegram
+dev bridge's runtime `pip install websockets` is gone: it spawned an unguarded
+subprocess *and* pulled an unpinned dependency into a live process, the very
+drift A5 pinned the lockfile to prevent.
+
+**Verified.** `tests/test_b8_exec_guard.py` (14 tests): `shell=True` refused;
+a **simulated PATH hijack** (a planted `whisper-cli` in a temp dir prepended
+to `PATH`) is refused; relative and untrusted-absolute `argv[0]` refused;
+timeout mandatory and a wedged binary really is killed; `minimal_env()`
+excludes the gateway's secrets and an actual child process confirms it cannot
+read `GEMINI_API_KEY`; argument injection rejected; the happy path executes
+and is audited. Full suite 344 passed.
+
+**Honest scope.** The notes say it plainly: *"removing the shell alone is
+never the whole answer."* Python code can still `import subprocess` and
+bypass this module entirely, or open sockets itself — nothing in-process can
+prevent that. What is closed is the PATH hijack, the unbounded run, the
+environment leak and the argument injection **on the gateway's own
+shell-outs**, plus making the sanctioned ones auditable. The real fix is the
+notes' list — per-component minimal images, sandbox isolation, non-root,
+read-only filesystems, syscall filtering, egress limits — i.e. component
+separation again. (`gemini_live/smoke.py` still calls `subprocess` directly;
+it is a standalone manual smoke script, not imported by the gateway.)

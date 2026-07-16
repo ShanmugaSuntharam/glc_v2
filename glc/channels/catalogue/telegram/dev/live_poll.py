@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import subprocess
 import sys
 
 import httpx
@@ -66,12 +65,20 @@ async def main() -> None:
 
     print(f"Connecting to GLC Gateway WebSocket at: ws://localhost:{gateway_port}/v1/channels/telegram")
 
+    # Finding B8 (and A5): this used to shell out to `pip install websockets`
+    # at runtime. Installing a package mid-run spawns an unguarded subprocess
+    # and pulls an unpinned dependency from the network into a live process --
+    # exactly the supply-chain drift A5 pinned the lockfile to prevent. Fail
+    # with instructions instead; websockets is already a declared dependency.
     try:
         import websockets
     except ImportError:
-        print("Installing websockets library...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets"])
-        import websockets
+        print(
+            "[live_poll] the 'websockets' package is not installed. Run `uv sync` "
+            "(it is a declared dependency) rather than installing at runtime.",
+            file=sys.stderr,
+        )
+        return
 
     async with websockets.connect(ws_url) as ws:
         print("Connected to GLC Gateway WebSocket!")

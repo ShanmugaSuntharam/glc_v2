@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess
 import tempfile
 from pathlib import Path
+
+from glc.security import exec_guard
 
 MODEL_DIR = Path(os.path.expanduser(os.getenv("GLC_WHISPER_MODEL_DIR", "~/.glc/models/whisper-base")))
 MODEL_FILE = MODEL_DIR / "ggml-base.bin"
@@ -32,15 +32,26 @@ WHISPER_THREADS = int(os.getenv("GLC_WHISPER_THREADS", str(_DEFAULT_THREADS)))
 # with negligible accuracy loss on typical speech.
 WHISPER_BEAM_SIZE = int(os.getenv("GLC_WHISPER_BEAM_SIZE", "2"))
 
+# Finding B8: whisper transcription is not fast, but it is bounded. An
+# unbounded subprocess is a free denial of service (invariant 8).
+WHISPER_TIMEOUT_S = int(os.getenv("GLC_WHISPER_TIMEOUT_S", "300"))
+
 
 def run_whisper_cpp(audio: bytes, mime: str, use_vad: bool = False) -> tuple[str, str, int]:
-    cli = shutil.which("whisper-cli") or shutil.which("whisper.cpp")
-    if cli is None:
-        raise RuntimeError(
-            "whisper-cli binary not found on PATH. Install whisper.cpp "
-            "and place its 'whisper-cli' binary on PATH, or use "
-            "prefer='default' for Groq."
-        )
+    # Finding B8: resolve through the exec guard, not shutil.which(). which()
+    # honours PATH, and in-process code can prepend its own directory and have
+    # a "transcription" execute its binary instead. resolve_binary() refuses
+    # anything outside a trusted bin dir.
+    try:
+        cli = exec_guard.resolve_binary("whisper-cli")
+    except exec_guard.ExecNotPermitted:
+        try:
+            cli = exec_guard.resolve_binary("whisper.cpp")
+        except exec_guard.ExecNotPermitted as e:
+            raise RuntimeError(
+                f"whisper-cli is not usable: {e}. Install whisper.cpp and place its "
+                "'whisper-cli' binary in a trusted bin dir, or use prefer='default' for Groq."
+            ) from None
     if not MODEL_FILE.exists():
         raise RuntimeError(
             f"whisper base model not found at {MODEL_FILE}. Run "
@@ -69,8 +80,12 @@ def run_whisper_cpp(audio: bytes, mime: str, use_vad: bool = False) -> tuple[str
         if use_vad:
             cmd.extend(["-nth", str(VAD_THRESHOLD)])
 
-        out = subprocess.run(
+        # B8: via the exec guard — absolute trusted binary, mandatory timeout,
+        # minimal environment (the child has no business seeing the gateway's),
+        # never a shell, and audited.
+        out = exec_guard.run(
             cmd,
+            timeout=WHISPER_TIMEOUT_S,
             capture_output=True,
             text=True,
             check=True,
