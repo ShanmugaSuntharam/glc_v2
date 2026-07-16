@@ -14,6 +14,11 @@ import pytest
 from starlette.websockets import WebSocketDisconnect
 
 
+def _auth(token: str) -> dict:
+    """C3: the token goes in the header, never the query string."""
+    return {"Authorization": f"Bearer {token}"}
+
+
 def _envelope(channel: str) -> dict:
     return {
         "channel": channel,
@@ -28,7 +33,7 @@ def _envelope(channel: str) -> dict:
 def test_ws_rejects_cross_channel_spoof(app_client, install_token):
     """An adapter bound to /telegram declaring env.channel='discord' is
     rejected and the socket is closed."""
-    with app_client.websocket_connect(f"/v1/channels/telegram?token={install_token}") as ws:
+    with app_client.websocket_connect("/v1/channels/telegram", headers=_auth(install_token)) as ws:
         ws.send_text(json.dumps(_envelope("discord")))
         resp = json.loads(ws.receive_text())
         assert "channel mismatch" in resp["error"]
@@ -40,7 +45,7 @@ def test_ws_rejects_cross_channel_spoof(app_client, install_token):
 def test_ws_accepts_matching_channel(app_client, install_token):
     """A matching envelope is NOT treated as a spoof and the socket stays
     open (the message goes on to the normal allowlist path)."""
-    with app_client.websocket_connect(f"/v1/channels/telegram?token={install_token}") as ws:
+    with app_client.websocket_connect("/v1/channels/telegram", headers=_auth(install_token)) as ws:
         ws.send_text(json.dumps(_envelope("telegram")))
         resp = json.loads(ws.receive_text())
         assert "channel mismatch" not in json.dumps(resp)

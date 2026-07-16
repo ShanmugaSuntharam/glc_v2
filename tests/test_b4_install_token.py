@@ -134,13 +134,17 @@ def test_data_plane_rejects_the_hash_from_disk(app_client, install_token):
 
 
 def test_ws_rejects_the_hash_from_disk(app_client, install_token):
+    """C3: the token now travels in the Authorization header, not ?token=."""
     stolen = _read_token_file()
-    with app_client.websocket_connect(f"/v1/channels/telegram?token={install_token}") as ws:
+    real = {"Authorization": f"Bearer {install_token}"}
+    with app_client.websocket_connect("/v1/channels/telegram", headers=real) as ws:
         assert ws is not None  # the real token still connects
 
     import pytest
     from starlette.websockets import WebSocketDisconnect
 
     with pytest.raises(WebSocketDisconnect):
-        with app_client.websocket_connect(f"/v1/channels/telegram?token={stolen}") as ws:
+        with app_client.websocket_connect(
+            "/v1/channels/telegram", headers={"Authorization": f"Bearer {stolen}"}
+        ) as ws:
             ws.receive_text()

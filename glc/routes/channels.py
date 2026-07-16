@@ -2,8 +2,11 @@
 
 Adapters connect over WebSocket and exchange JSON-serialised
 ChannelMessage and ChannelReply envelopes. The connection is gated by
-the installation token presented in the Authorization header (Sec-Websocket
-clients can pass it as a query string fallback, ?token=...).
+the installation token presented in the Authorization header. Session 12,
+finding C3: the header is the ONLY accepted place — the old ?token=...
+query-string fallback is gone, because a query string is written down in
+access logs, browser history and Referer headers, leaving the credential at
+rest wherever those end up.
 
 This endpoint is the contract surface adapters speak to. The gateway
 processes incoming messages through the rate limiter, allowlist,
@@ -35,12 +38,28 @@ router = APIRouter()
 
 @router.websocket("/v1/channels/{name}")
 async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(default=None)):
+    # Finding C3: the install token is accepted from the Authorization HEADER
+    # ONLY. It used to fall back to ?token=..., and a query string is the one
+    # part of a request that gets written down everywhere: proxy and server
+    # access logs, browser history, Referer headers, metrics labels. The
+    # credential ends up at rest in a dozen places nobody is protecting, long
+    # after the connection closed. The ?token= parameter is still accepted by
+    # the signature so the attempt can be recognised and reported rather than
+    # failing as a confusing 1008.
     header_auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
     presented = None
     if header_auth and header_auth.startswith("Bearer "):
         presented = header_auth.removeprefix("Bearer ").strip()
     elif token:
-        presented = token
+        audit_append(
+            channel=name,
+            channel_user_id="_unauthenticated",
+            trust_level="untrusted",
+            event_type="ws_token_in_query_string",
+            result={"reason": "token must be sent in the Authorization header, not the URL"},
+        )
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
     # B4: hash-verify (constant-time) instead of pulling a plaintext token
     # off disk to compare against.
     if not verify_install_token(presented):

@@ -123,14 +123,18 @@ async def run_bridge():
         print("Export the install token before running this bridge.", file=sys.stderr)
         return
     glc_port = os.environ.get("GLC_PORT", "8111")
-    glc_ws_url = f"ws://localhost:{glc_port}/v1/channels/discord?token={install_token}"
+    # Finding C3: the token goes in the Authorization header, never in the URL
+    # -- a query string is written down in access logs, browser history and
+    # Referer headers, so ?token= leaves the credential at rest all over.
+    glc_ws_url = f"ws://localhost:{glc_port}/v1/channels/discord"
+    glc_ws_headers = {"Authorization": f"Bearer {install_token}"}
 
     # 2. Instantiate client and adapter
     client = RealDiscordClient(token=bot_token)
     adapter = Adapter(config={"client": client})
 
     print("[bridge] connecting to local GLC gateway...")
-    async with websockets.connect(glc_ws_url) as glc_ws:
+    async with websockets.connect(glc_ws_url, additional_headers=glc_ws_headers) as glc_ws:
         print("[bridge] connected to GLC gateway. Connecting to Discord WebSocket gateway...")
 
         # 3. Connect to Discord Gateway

@@ -688,3 +688,47 @@ validated IP. What is implemented is exactly the notes' prescribed fix —
 "resolve the host, block loopback, private, and link-local addresses for IPv4
 and IPv6, and re-check after every redirect" — plus the allowlist, bounds and
 auditing.
+
+---
+
+## C3 — WS token in the query string
+
+**Invariant restored:** supports 1/2 — a credential that leaks is a
+credential.
+**Attacker role:** 1–2 — anyone who can read a log, a browser history, or a
+Referer header.
+
+**The bug.** `WS /v1/channels/{name}` accepted the install token as
+`?token=...`. A query string is the one part of a request that gets **written
+down everywhere**: proxy and server access logs, browser history, `Referer`
+headers, metrics labels, crash reports. Unlike a header, it comes to rest — in
+plaintext, in a dozen places nobody is guarding, long after the connection
+closed. The credential outlives the request.
+
+**The fix.** `glc/routes/channels.py` accepts the token from the
+**Authorization header only**. The `?token=` parameter is still *parsed*, but
+only so the attempt can be **recognised and audited**
+(`ws_token_in_query_string`) before the socket is closed — an operator whose
+adapter stopped connecting gets a reason instead of a bare 1008. The shipped
+clients were updated to match: the telegram and discord dev bridges now pass
+`Authorization: Bearer …` via `additional_headers` instead of building
+`ws://…?token=…`.
+
+**Verified.** `tests/test_c3_ws_token.py` (7 tests): the header connects; a
+query-string token is refused **even when it is the correct token**, and the
+attempt is audited; no token, a wrong token, and a non-Bearer header are each
+refused. Plus a regression guard that greps the shipped code for `?token={`
+interpolation, so the credential cannot drift back into a URL by habit. The
+existing C2 and B4 WS tests were moved to header auth. Full suite 397 passed.
+
+**Also fixed.** That regression guard immediately earned its keep: it caught
+`channels.py`'s own **module docstring still advertising the query-string
+fallback** as supported. Stale docs that describe a removed security control
+are how the control gets "helpfully" restored later.
+
+**Not done (deliberate).** The notes' fix reads "header-only, **short-lived
+tokens**". Header-only is done. Short-lived tokens mean minting per-session
+credentials with an expiry — that is invariant 4's "a credential must work
+only for one specific tool call", a real feature (issuance, refresh,
+revocation) rather than a hardening, and it belongs with the agent runtime in
+a later session. The install token remains long-lived by design.

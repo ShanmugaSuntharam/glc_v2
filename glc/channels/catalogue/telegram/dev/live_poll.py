@@ -60,8 +60,12 @@ async def main() -> None:
     # Instantiate the adapter
     adapter = Adapter()
 
-    # WebSocket URL
-    ws_url = f"ws://localhost:{gateway_port}/v1/channels/telegram?token={install_token}"
+    # WebSocket URL. Finding C3: the token travels in the Authorization
+    # header, never in the URL -- a query string is written down in access
+    # logs, browser history and Referer headers, leaving the credential at
+    # rest in places nobody is protecting.
+    ws_url = f"ws://localhost:{gateway_port}/v1/channels/telegram"
+    ws_headers = {"Authorization": f"Bearer {install_token}"}
 
     print(f"Connecting to GLC Gateway WebSocket at: ws://localhost:{gateway_port}/v1/channels/telegram")
 
@@ -80,7 +84,7 @@ async def main() -> None:
         )
         return
 
-    async with websockets.connect(ws_url) as ws:
+    async with websockets.connect(ws_url, additional_headers=ws_headers) as ws:
         print("Connected to GLC Gateway WebSocket!")
         offset = 0
 
