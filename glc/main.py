@@ -36,6 +36,29 @@ from glc.security import keyvault  # noqa: E402
 PORT = int(os.getenv("GLC_PORT", "8111"))
 
 
+def _audit_lifecycle(event_type: str, params: dict) -> None:
+    """Finding B6: record the gateway starting and stopping.
+
+    An in-process `os.kill(os.getpid(), SIGTERM)` cannot be prevented from
+    inside the process, but it does not have to be *silent*. A shutdown event
+    (and the startup that follows Modal restarting the container) lands in the
+    audit log, so a kill leaves a trace in B2's hash chain instead of the
+    gateway simply vanishing. Never let auditing break start/stop.
+    """
+    try:
+        from glc.audit import append as audit_append
+
+        audit_append(
+            channel="_system",
+            channel_user_id="_gateway",
+            trust_level="owner_paired",
+            event_type=event_type,
+            params=params,
+        )
+    except Exception:
+        pass
+
+
 def _install_sighup_reload() -> None:
     """Hot-reload policy.yaml on SIGHUP. Windows lacks SIGHUP so this is
     a no-op there."""
@@ -84,7 +107,17 @@ async def lifespan(app: FastAPI):
     app.state.embedders, app.state.embed_order = E.build_embedders()
     app.state.started_at = time.time()
     app.state.registered_channels = []
-    yield
+    # Finding B6: bracket the process's life with audit events, so a kill (and
+    # the restart that follows it) is visible in the log rather than the
+    # gateway just disappearing.
+    _audit_lifecycle("gateway_startup", {"pid": os.getpid()})
+    try:
+        yield
+    finally:
+        _audit_lifecycle(
+            "gateway_shutdown",
+            {"pid": os.getpid(), "uptime_s": int(time.time() - app.state.started_at)},
+        )
 
 
 # Finding A2: /docs, /redoc, and /openapi.json publicly leaked the full

@@ -14,6 +14,7 @@ import time
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
+from glc.audit import append as audit_append
 from glc.security.auth import require_install_token as _require_token
 from glc.security.pairing import CODE_TTL_SECONDS, get_pairing_store
 
@@ -92,11 +93,29 @@ async def kill(request: Request, authorization: str | None = Header(default=None
     _require_token(authorization)
     client_host = request.client.host if request.client else "unknown"
     if os.getenv("GLC_KILL_ALLOW_REMOTE") != "1" and client_host not in ("127.0.0.1", "::1", "localhost"):
+        # Finding B6: a refused kill is an attack signal — record it.
+        audit_append(
+            channel="_system",
+            channel_user_id=client_host,
+            trust_level="owner_paired",
+            event_type="control_kill_denied",
+            result={"reason": "not loopback", "client_host": client_host},
+        )
         raise HTTPException(
             403,
             f"kill is restricted to loopback (got {client_host}). "
             "Set GLC_KILL_ALLOW_REMOTE=1 to override (not recommended).",
         )
+    # Finding B6: terminating the gateway is the most consequential thing the
+    # control plane can do, and it used to leave no trace at all. Record it
+    # BEFORE dying — afterwards there is no process left to write anything.
+    audit_append(
+        channel="_system",
+        channel_user_id=client_host,
+        trust_level="owner_paired",
+        event_type="control_kill_accepted",
+        params={"client_host": client_host, "pid": os.getpid()},
+    )
     # Send SIGTERM to ourselves shortly after returning so the client gets a 200.
     import asyncio
 

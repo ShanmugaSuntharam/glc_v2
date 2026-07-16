@@ -558,3 +558,63 @@ capstone (a separate policy process) does not raise it, because the thing that
 *acts* on the verdict is the gateway itself. The real boundary is keeping
 untrusted code out of the gateway process — which is what A3 does for
 adapters, and what invariant 3's deterministic authorisation boundary is for.
+
+---
+
+## B6 — An adapter that kills the gateway (leak 8)
+
+**Invariant restored:** 8 (availability) — *for the named attacker*; 7
+(nothing consequential goes unrecorded) for the rest.
+**Attacker role:** 3 (an adapter — closed by A3) and 4 (code inside the
+gateway — not preventable in-process).
+
+**The bug.** Adapters shared the gateway's process, so one line ended it:
+
+```python
+os.kill(os.getpid(), signal.SIGTERM)
+```
+
+**The notes' prescribed fix is already delivered — by A3.** Leak 8's fix is,
+verbatim, *"puts adapters in a separate PID namespace so they cannot see the
+gateway's process."* That is exactly what A3 did: channel adapters run in
+per-adapter Modal Sandboxes, each with its own PID namespace, so an adapter
+that kills its own PID kills **its sandbox**, and the gateway does not notice.
+The named attacker for B6 no longer shares a process with the target.
+
+**What is left, and what this fix adds.** The remaining actor is code inside
+the *gateway* — and no in-process code can stop a process from ending itself.
+`os._exit()` and `SIGKILL` cannot even be intercepted. So B6's in-branch work
+is **visibility**, not prevention:
+
+* `glc/main.py` brackets the process's life with `gateway_startup` /
+  `gateway_shutdown` audit events (the latter carrying uptime), written in the
+  lifespan's `finally`. A SIGTERM — including the one an in-process
+  `os.kill()` sends — runs uvicorn's graceful shutdown, so the kill leaves a
+  trace in B2's hash chain instead of the gateway simply vanishing. The
+  restart Modal performs then shows up as the next `gateway_startup`, so a
+  kill/restart cycle is legible after the fact.
+* `glc/routes/control.py` audits the control-plane kill, which previously left
+  **no trace at all** — the single most consequential thing the control plane
+  can do was unrecorded. `control_kill_accepted` is written *before* dying
+  (afterwards there is no process left to write anything), and a refused
+  remote kill is recorded as `control_kill_denied`, since a rejected kill is
+  an attack signal worth keeping.
+
+The remote kill remains loopback-only (the notes already call this out as
+correct), and B4 still gates the endpoint behind the install token.
+
+**Verified.** `tests/test_b6_kill_visibility.py` (7 tests): startup and
+shutdown are audited and the shutdown record carries uptime and pid; a remote
+kill is denied *and* audited; a kill without a token is rejected (401); and
+the A3 claim is pinned — adapter work is dispatched into a Sandbox rather than
+called inline, and `modal_app.py` really does set `GLC_ADAPTER_SANDBOX=1`, the
+switch that puts adapters behind the PID-namespace wall on the deployment.
+Full suite 362 passed.
+
+**Honest scope.** Prevention against in-gateway code is not achievable here
+and this fix does not claim it: `os._exit()` or `SIGKILL` leaves no shutdown
+record, because nothing gets to run. Availability against code executing in
+the gateway is a containment problem, not a coding one — Modal restarts the
+container, so the blast radius is a brief outage rather than a dead install.
+For the attacker the finding actually names — an adapter — A3's PID namespace
+is the fix, and it is already in place.
