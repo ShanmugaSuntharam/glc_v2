@@ -490,3 +490,71 @@ notes' list — per-component minimal images, sandbox isolation, non-root,
 read-only filesystems, syscall filtering, egress limits — i.e. component
 separation again. (`gemini_live/smoke.py` still calls `subprocess` directly;
 it is a standalone manual smoke script, not imported by the gateway.)
+
+---
+
+## B5 — Policy engine open to monkey-patching (leak 5)
+
+**Invariant restored:** 3/6 — *partially, and honestly.* Read the scope below
+before crediting this one.
+**Attacker role:** 3 (an adapter — already gone, see below) and 4 (code
+executing inside the gateway — not defensible in-process).
+
+**The bug.** Python lets any module-level function be rebound at runtime, so
+one line makes policy stop mattering:
+
+```python
+glc.policy.engine.evaluate = lambda *_, **__: PolicyVerdict(action="allow", reason="pirate")
+```
+
+**Three things that are true, and change what "fixed" can mean here:**
+
+1. **There is no enforcement caller yet.** Nothing in `glc/routes/` calls
+   `evaluate()` — the S11 agent runtime is a stub that echoes. The policy
+   engine is scaffolding for a later session, so today the monkey-patch
+   bypasses a check nobody is making. This fix exists so the check is guarded
+   from the moment it *is* wired in.
+2. **The named attacker is already gone.** Leak 5's attacker is "an adapter",
+   and **A3** moved channel adapters out of this process into per-adapter
+   Modal Sandboxes. An adapter has no handle on `glc.policy.engine` any more —
+   no shared memory, no shared module table.
+3. **Against code inside the gateway, nothing in-process helps — and neither
+   does the capstone fix.** The notes prescribe running the policy engine in a
+   separate process, but the **enforcement point still lives in the gateway**:
+   an attacker executing there can rebind the guard, or simply never call
+   policy and dispatch the tool directly. Moving the engine out protects it
+   *from adapters* (which A3 already achieved), not from the gateway.
+
+**The fix.** `glc/policy/guard.py` is the sanctioned entry point:
+
+* it captures the real function objects **at import**, before adapter or
+  dependency code runs, and calls *those* — so a rebound
+  `glc.policy.engine.evaluate` is never used even when present (the exploit
+  hijacks a name *lookup*; the guard does not do one);
+* it verifies the engine's identity on every call (`verify_policy_integrity()`,
+  mirroring B2's `verify_chain()` and B3's `verify_pairings()`);
+* it **fails closed** — a process whose policy engine has been rewritten is not
+  one whose verdicts mean anything, so it denies rather than trusting even the
+  original engine's answer;
+* it **audits** the tampering into B2's tamper-evident log.
+
+`glc/policy/__init__.py` now exports the guarded `evaluate`, so the future
+enforcement points get this by default via `from glc.policy import evaluate`;
+`glc.policy.engine.evaluate` stays importable as the raw function.
+
+**Verified.** `tests/test_b5_policy_guard.py` (11 tests) runs the notes'
+exploit verbatim: the rebound lambda says "allow" and the guard still returns
+**deny**, never "pirate"; rebinding the module function, the `PolicyEngine`
+method, or `get_engine` is each detected; tampering fails closed even where
+policy *would* have allowed (owner_paired + an unmatched tool); the tampering
+is audited; integrity recovers when the patch is undone; and the package
+exports the guarded entry point. Full suite 355 passed.
+
+**Honest scope.** This is a **mitigation, not a close**. The named one-liner
+no longer silently succeeds — it fails, loudly. A determined attacker with
+code in the gateway rebinds `glc.policy.guard.evaluate` instead, or skips
+policy altogether. That is the ceiling for B5, and unlike B2/B3 the notes'
+capstone (a separate policy process) does not raise it, because the thing that
+*acts* on the verdict is the gateway itself. The real boundary is keeping
+untrusted code out of the gateway process — which is what A3 does for
+adapters, and what invariant 3's deterministic authorisation boundary is for.
